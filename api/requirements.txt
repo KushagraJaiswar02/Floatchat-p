@@ -1,0 +1,22 @@
+# API Dependencies - Flask Backend
+
+
+# Web framework
+flask==3.0.3
+flask-cors==4.0.0
+
+# Database connectivity
+psycopg2-binary==2.9.9
+
+# Data processing and ML
+numpy==1.26.4
+sentence-transformers==3.0.1
+
+# Geographic calculations
+geopy==2.4.1
+
+# AI/LLM integration
+google-generativeai==0.8.3
+
+# Environment variables
+python-dotenv==1.0.1

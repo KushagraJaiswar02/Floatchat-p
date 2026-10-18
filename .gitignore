@@ -1,0 +1,21 @@
+
+venv/
+node_modules/
+__pycache__/
+.env
+# Ignore Python virtual environments
+venv/
+.venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+frontend/dummy.db
+
+
+.test-docker.ps1
+.test-docker.sh
+.TESTING_GUIDE.md
+dummy.db
