@@ -150,23 +150,57 @@ def show_thinking_animation():
     
     return thinking_placeholder
 
+
+def _source_badge(data):
+    """Return HTML badge showing data source."""
+    cs = data.get("cache_status", "local")
+    src = data.get("source", "local") or "local"
+    if cs == "live":
+        col, txt = "#27ae60", "\U0001f7e2 Live \u2014 Argo GDAC"
+    elif cs == "cached" or "erddap" in src:
+        col, txt = "#2980b9", "\U0001f535 Cached \u2014 Argo GDAC"
+    elif cs == "error":
+        col, txt = "#c0392b", "\u26a0\ufe0f Retrieval error"
+    else:
+        col, txt = "#7f8c8d", "\u26ab Local dataset"
+    return (
+        f'<span style="background:{col};color:white;padding:2px 8px;'
+        f'border-radius:4px;font-size:0.8rem;font-weight:600">{txt}</span>'
+    )
+
+
 def display_metadata(data):
-    """Display metadata in a clean format"""
-    metadata_html = f"""
-    <div class="metadata-container">
-        <div class="metadata-item"> <strong>Location:</strong> {data.get('lat', 'N/A'):.3f}°N, {data.get('lon', 'N/A'):.3f}°E</div>
-        <div class="metadata-item"> <strong>Time:</strong> {data.get('time', 'N/A')}</div>
-        <div class="metadata-item"> <strong>Profile:</strong> {data.get('profile_id', 'N/A')}</div>
-    </div>
-    """
-    st.markdown(metadata_html, unsafe_allow_html=True)
+    """Display profile metadata with data-source indicator."""
+    lat = data.get("lat")
+    lon = data.get("lon")
+    lat_s = f"{lat:.3f}\u00b0N" if isinstance(lat, (int, float)) else "N/A"
+    lon_s = f"{lon:.3f}\u00b0E" if isinstance(lon, (int, float)) else "N/A"
+    wmo = data.get("wmo_id") or "N/A"
+    badge = _source_badge(data)
+    dm_map = {"R": "Real-time", "A": "Adjusted", "D": "Delayed-mode"}
+    dmode = dm_map.get(data.get("data_mode"), data.get("data_mode") or "\u2014")
+    source_url = data.get("source_url")
+    url_html = (
+        f'<a href="{source_url}" target="_blank" style="color:#aad4f5;font-size:0.75rem">ERDDAP source</a>'
+        if source_url else ""
+    )
+    html = (
+        '<div class="metadata-container">'
+        f'<div class="metadata-item"><strong>Source:</strong> {badge} {url_html}</div>'
+        f'<div class="metadata-item"><strong>Float WMO:</strong> {wmo}</div>'
+        f'<div class="metadata-item"><strong>Location:</strong> {lat_s}, {lon_s}</div>'
+        f'<div class="metadata-item"><strong>Time:</strong> {data.get("time", "N/A")}</div>'
+        f'<div class="metadata-item"><strong>Data mode:</strong> {dmode}</div>'
+        f'<div class="metadata-item"><strong>Profile ID:</strong> {data.get("profile_id", "N/A")}</div>'
+        "</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
 
 def show_chatbot_ui():
-    st.set_page_config(
-        page_title="FloatChat", 
-        layout="wide",
-        page_icon="🌊"
-    )
+    # NOTE: st.set_page_config() is intentionally omitted here.
+    # It is called once in front.py (the main entry point).
+    # Calling it a second time raises StreamlitAPIException.
 
     st.markdown("""
     <style>

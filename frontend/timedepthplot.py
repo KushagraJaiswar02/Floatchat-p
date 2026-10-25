@@ -1,12 +1,17 @@
 # timedepth_plot.py
+import os
 import streamlit as st 
 import pandas as pd
 import numpy as np
 import sqlite3
 import plotly.express as px 
 
+# Resolve dummy.db relative to this file's directory, not the CWD.
+_FRONTEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_DUMMY_DB = os.path.join(_FRONTEND_DIR, "dummy.db")
+
 def show_time_depth_plot():
-    conn= sqlite3.connect("dummy.db")
+    conn= sqlite3.connect(_DUMMY_DB)
     df=pd.read_sql("SELECT * FROM profiles", conn)
     conn.close()
 

@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,6 +9,11 @@ from datetime import datetime, timedelta
 from timedepthplot import show_time_depth_plot
 from map_page import show_map
 from chatbot_ui import show_chatbot_ui
+
+# Resolve dummy.db to an absolute path so it works regardless of CWD.
+_FRONTEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_DUMMY_DB = os.path.join(_FRONTEND_DIR, "dummy.db")
+
 
 
 st.set_page_config(
@@ -274,7 +280,7 @@ if 'current_page' not in st.session_state:
 
 @st.cache_resource
 def create_dummy_data():
-    conn = sqlite3.connect("dummy.db", check_same_thread=False)
+    conn = sqlite3.connect(_DUMMY_DB, check_same_thread=False)
     cursor = conn.cursor()
     
     cursor.execute("""

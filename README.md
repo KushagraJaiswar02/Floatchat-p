@@ -6,13 +6,12 @@
 
 **Where Data Meets the Deep — Intelligent Ocean Data Analysis Made Simple**
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red.svg)](https://streamlit.io)
 [![Flask](https://img.shields.io/badge/Flask-3.0+-green.svg)](https://flask.palletsprojects.com)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13+-blue.svg)](https://postgresql.org)
 [![Sentence Transformers](https://img.shields.io/badge/Sentence%20Transformers-3.0+-orange.svg)](https://huggingface.co/sentence-transformers)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
 
 </div>
 
@@ -20,555 +19,351 @@
 
 ## What is FloatChat?
 
-FloatChat is an innovative **AI-powered conversational interface** that transforms complex ARGO oceanographic data into intuitive, natural language queries. Built with modern technologies, it allows researchers, oceanographers, and data enthusiasts to explore ocean data through simple conversations, interactive visualizations, and intelligent insights.
-
-### Key Highlights
-
-- **AI-Powered Search**: Uses sentence transformers and semantic embeddings for intelligent data discovery
-- **Geospatial Intelligence**: Automatic geocoding and location-aware filtering  
-- **Interactive Visualizations**: Beautiful depth-time plots, maps, and real-time analytics
-- **Natural Language Interface**: Ask questions in plain English about ocean data
-- **Real-time Processing**: Fast query response with intelligent caching and hybrid scoring
-- **Modern UI**: Beautiful Streamlit interface with ocean-themed design
+FloatChat is an AI-powered conversational interface for ARGO oceanographic float data. It lets you query ocean profiles (temperature, salinity, pressure) using natural language, visualise results interactively, and get plain-English explanations powered by Google Gemini.
 
 ---
 
-##  Architecture Overview
+## Architecture Overview
 
-```mermaid
-graph TB
-    A[NetCDF Files] --> B[Data Ingestion]
-    B --> C[PostgreSQL Database]
-    B --> D[Vector Embeddings]
-    C --> E[Flask API Backend]
-    D --> E
-    E --> F[Streamlit Frontend]
-    F --> G[Interactive Visualizations]
-    F --> H[Chat Interface]
-    
-    I[User Queries] --> H
-    H --> E
-    E --> J[AI Processing]
-    J --> K[Results & Visualizations]
-    
-    L[Google Gemini AI] --> E
-    E --> M[Natural Language Explanations]
+```
+Official Argo GDAC (Ifremer ERDDAP)
+       │  (on-demand fetch / tabledap CSV)
+       ▼
+   api/query.py ──► api/query_parser.py (deterministic extraction)
+       │
+       ├──► api/argo_cache.py (PostgreSQL caching / idempotent upserts)
+       │           ├── profiles (wmo_id, juld, lat, lon, source, source_url)
+       │           └── profile_levels (pres, temp, psal, QC flags)
+       │
+       └──► Google Gemini (models/gemini-2.5-flash) ──► Grounded Explanation
+                                                              │
+User query ──► Streamlit frontend (frontend/front.py) ◄───────┘
+                     (Source badges: 🟢 Live | 🔵 Cached | ⚫ Local | ⚠️ Error)
 ```
 
 ---
 
-## Tech Stack
+## Prerequisites
 
-### Backend & API
-- **Flask** - Lightweight web framework for API development
-- **PostgreSQL** - Relational database for structured oceanographic data
-- **Sentence Transformers** - AI embeddings using `all-MiniLM-L6-v2` model
-- **Google Gemini AI** - Natural language processing for query explanations
-- **psycopg2-binary** - PostgreSQL adapter for database operations
-
-### Frontend & Visualization
-- **Streamlit** - Interactive web application framework with custom CSS
-- **Plotly** - Advanced 2D/3D data visualizations with interactive features
-- **Pandas** - Data manipulation and analysis for real-time processing
-- **Geopy** - Geocoding and location services for place name resolution
-
-### Data Processing & ML
-- **xarray** - Multi-dimensional NetCDF file processing
-- **NumPy** - Numerical computing for vector operations
-- **Pandas** - Data analysis and time series processing
-- **SQLAlchemy** - Database ORM for advanced query operations
+| Requirement | Notes |
+|---|---|
+| Python **3.11** | Must match the `.venv` interpreter |
+| PostgreSQL **13+** (tested on 18.6) | Running locally on port 5432 |
+| Google Gemini API key | `models/gemini-1.5-flash`; chatbot degrades gracefully without it |
+| Virtual environment `.venv` | Already created in the repo root |
 
 ---
 
-## 📁 Project Structure
+## Environment Variables
 
+Create a file called **`.env`** in the **repository root** (or copy `.env.example`):
+
+```bash
+# PostgreSQL Database Configuration
+HOST_NAME=localhost
+DATABASE_NAME=floatchatai
+USER_NAME=postgres
+PASSWORD=your_db_password
+PORT=5432
+
+# Google Gemini API Key
+GOOGLE_API_KEY=your_gemini_api_key
+GEMINI_MODEL=models/gemini-2.5-flash
+
+# Live Argo Integration Settings (Optional defaults shown)
+ARGO_LIVE_FETCH=true
+ARGO_LOCAL_FALLBACK=true
+ARGO_MAX_PROFILES=20
+ARGO_ERDDAP_TIMEOUT=30
+ARGO_CACHE_TTL_HOURS=24
+FLOATCHAT_TOP_K=3
+FLOATCHAT_RADIUS_METERS=50000
 ```
-floatchat-clean/
-├── 📁 api/                     # Flask backend service
-│   ├── Dockerfile              # Multi-stage Docker build for API
-│   ├── app.py                  # Main Flask application
-│   ├── main.py                 # API entry point with CORS
-│   ├── query.py                # Advanced query processing with Gemini AI
-│   ├── fallback_query.py       # Fallback query handling
-│   └── requirements.txt        # Backend dependencies
-|
-├── 📁 frontend/                # Streamlit user interface
-│   ├── Dockerfile              # Multi-stage Docker build for Frontend
-│   ├── chatbot_ui.py           # Main chat interface with visualizations
-│   ├── front.py                # Multi-page application with navigation
-│   ├── map_page.py             # Geospatial visualizations and maps
-│   ├── timedepthplot.py        # Depth-time analysis and heatmaps
-│   ├── dummy.py                # Demo data utilities
-│   ├── FloatChat.png           # Application logo
-│   ├── layered-waves-haikei.svg # Background graphics
-│   └── requirements.txt        # Frontend dependencies
-|
-├── 📁 ingestion/               # Data processing pipeline
-│   ├── main.py                 # NetCDF → PostgreSQL + Vector embeddings
-│   ├── requirements.txt        # Ingestion dependencies
-│   └── tempCodeRunnerFile.py   # Development utilities
-|
-├── 📁 data/                    # Raw NetCDF oceanographic files
-│   └── 20250901_prof.nc        # Sample ARGO float data
-|
-├── 📁 infra/                   # Infrastructure and setup scripts
-├── 📁 .github/                  # GitHub Actions workflows
-│   └── workflows/
-│       └── ci.yml              # CI/CD pipeline for testing and Docker builds
-├── dummy.db                    # SQLite demo database
-├── requirements.txt            # Global project dependencies
-└── README.md                   # This documentation
+
+> [!IMPORTANT]
+> All secrets are loaded exclusively from the root `.env`. Neither `api/query.py` nor `ingestion/main.py` hard-code credentials. If any of the five required variables are missing the API will refuse to start and print which ones are absent (never their values).
+
+---
+
+## Local Setup (Windows / PowerShell)
+
+### 1 — Clone and activate the virtual environment
+
+```powershell
+cd C:\PROJECTSPACE\WorkSpace\floatchat
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2 — Verify installed packages
+
+```powershell
+# All dependencies for API + frontend are already installed in .venv
+.venv\Scripts\python.exe -c "import flask, psycopg2, streamlit, sentence_transformers; print('OK')"
+```
+
+If a package is missing, install from the relevant requirements file:
+
+```powershell
+.venv\Scripts\pip.exe install -r api\requirements.txt
+.venv\Scripts\pip.exe install -r frontend\requirements.txt
+```
+
+### 3 — Verify the database
+
+```powershell
+.venv\Scripts\python.exe -c "
+import os, psycopg2
+from dotenv import load_dotenv
+load_dotenv('.env')
+conn = psycopg2.connect(host=os.getenv('HOST_NAME'), database=os.getenv('DATABASE_NAME'),
+                        user=os.getenv('USER_NAME'), password=os.getenv('PASSWORD'))
+cur = conn.cursor()
+cur.execute('SELECT COUNT(*) FROM profiles')
+print('profiles:', cur.fetchone()[0])
+cur.execute('SELECT COUNT(*) FROM profile_levels')
+print('profile_levels:', cur.fetchone()[0])
+conn.close()
+"
+```
+
+Expected output: `profiles: 75`, `profile_levels: 51364`
+
+---
+
+## Running the Application
+
+Open **two separate PowerShell terminals**, both in the repo root:
+
+### Terminal 1 — Flask API (port 5000)
+
+```powershell
+cd C:\PROJECTSPACE\WorkSpace\floatchat
+.\.venv\Scripts\Activate.ps1
+.venv\Scripts\flask.exe --app api\query run --no-reload --host 127.0.0.1 --port 5000
+```
+
+The API is ready when you see:
+```
+* Running on http://127.0.0.1:5000
+```
+
+### Terminal 2 — Streamlit Frontend (port 8501)
+
+```powershell
+cd C:\PROJECTSPACE\WorkSpace\floatchat
+.\.venv\Scripts\Activate.ps1
+.venv\Scripts\streamlit.exe run frontend\front.py
+```
+
+Then open **http://localhost:8501** in your browser.
+
+> [!TIP]
+> The frontend can also be run from any directory — all internal paths (`dummy.db`, etc.) are resolved relative to the source file location.
+
+---
+
+## Data Ingestion
+
+> [!CAUTION]
+> **Do NOT re-run ingestion against an already-populated database.** The script will detect existing rows and abort with an error rather than create duplicates. If you need to reimport, first truncate the tables and reset sequences manually in psql, then get approval.
+
+To ingest new NetCDF files into a fresh database:
+
+```powershell
+# Place .nc files in the data/ directory first
+.venv\Scripts\python.exe ingestion\main.py
+```
+
+The script:
+- Loads credentials from the root `.env`
+- Checks for existing rows and exits if any are found
+- Skips profiles with missing date/location
+- Skips depth levels where all three measurements are NULL
+- Rolls back on transaction failure
+
+---
+
+## API Endpoints
+
+| Method | URL | Description |
+|---|---|---|
+| GET | `http://127.0.0.1:5000/` | Health check |
+| POST | `http://127.0.0.1:5000/query` | Query ocean profiles |
+
+### POST /query
+
+**Request body:**
+```json
+{ "query": "ocean temperature at lat=-43.037, long=130" }
+```
+
+**Response:**
+```json
+[
+  {
+    "profile_id": 42,
+    "lat": -43.1,
+    "lon": 130.2,
+    "time": "2025-09-01 06:00:00",
+    "depth_levels": [
+      { "pres": 5.0, "temp": 10.2, "salinity": 34.8 }
+    ],
+    "query_explain": "Here's what I found about that area of the ocean..."
+  }
+]
+```
+
+**Error responses:**
+- `400` — Missing or empty `query` field, or non-JSON body
+- `500` — Database error or unexpected server error (details in server logs only)
+
+### Quick smoke tests (PowerShell)
+
+```powershell
+# Health check
+Invoke-RestMethod -Uri "http://127.0.0.1:5000/" -Method GET
+
+# Missing query field → should return 400
+Invoke-WebRequest -Uri "http://127.0.0.1:5000/query" -Method POST -ContentType "application/json" -Body "{}"
+
+# Valid query
+$body = '{"query": "ocean at lat=-43.037, long=130"}'
+Invoke-RestMethod -Uri "http://127.0.0.1:5000/query" -Method POST -ContentType "application/json" -Body $body
 ```
 
 ---
 
-##  Quick Start Guide
+## Running Tests
 
-### Prerequisites
-
-- **Python 3.8+**
-- **PostgreSQL 13+** (or SQLite for demo)
-- **Git**
-
-### 1️) Clone the Repository
-
-```bash
-git clone https://github.com/SyedOwais312/floatchat.git
-cd floatchat-clean
+```powershell
+.venv\Scripts\python.exe -m pytest -v
 ```
 
-### 2️)Install Dependencies
-
-#### Option A: Install Everything (Recommended)
-```bash
-# Install all dependencies at once
-pip install -r requirements.txt
-```
-
-#### Option B: Install Individual Components
-```bash
-# API only
-pip install -r api/requirements.txt
-
-# Frontend only  
-pip install -r frontend/requirements.txt
-
-# Ingestion only
-pip install -r ingestion/requirements.txt
-```
-
-### 3) Database Setup
-
-#### PostgreSQL Setup (Production)
-```bash
-# Create database and user
-sudo -u postgres psql
-CREATE DATABASE floatchatai;
-CREATE USER floatchat_user WITH PASSWORD 'your_secure_password';
-GRANT ALL PRIVILEGES ON DATABASE floatchatai TO floatchat_user;
-\q
-```
-
-#### SQLite Setup (Demo - No Setup Required)
-The project includes a `dummy.db` SQLite database for immediate testing.
-
-### 4️) Environment Configuration
-
-Create a `.env` file in the root directory:
-
-```bash
-# API Configuration
-GOOGLE_API_KEY=your_google_gemini_api_key
-QUERY_API=http://127.0.0.1:5000/query(for local)
-
-# Database Configuration (if using PostgreSQL)
-DB_HOST=localhost
-DB_NAME=floatchatai
-DB_USER=floatchat_user
-DB_PASSWORD=your_secure_password
-```
-
-### 5️) Start the Application
-
-#### Start Backend API
-```bash
-cd api
-python main.py
-# API will be available at http://localhost:5000
-```
-
-#### Start Frontend Application
-```bash
-cd frontend
-streamlit run front.py
-# Frontend will be available at http://localhost:8501
-```
-
-#### Data Ingestion (Optional)
-```bash
-cd ingestion
-python main.py
-# This processes NetCDF files and populates the database
-```
-
-### 6️) Access the Application
-
-- **Frontend**: http://localhost:8501 - Interactive ocean data explorer
-- **API**: http://localhost:5000 - REST API endpoints
-- **Map Visualization**: Navigate to Map page in the frontend
-- **Time-Depth Analysis**: Navigate to Depth-Time Plots page
+All 90 tests cover:
+- ERDDAP provider URL generation and CSV parsing
+- Filter validation and geographic bounding boxes
+- Date-range and float WMO ID resolution
+- Named oceanic regions (35+ defined regions)
+- Missing values and QC flag parsing
+- PostgreSQL cache idempotency and duplicate prevention
+- Cache TTL and freshness logic
+- Source attribution badges (Live vs Cached vs Local)
+- Backward compatibility with original frontend contracts
+- Prevention of silent fallback
+- Live smoke test against official ERDDAP (skipped if offline)
 
 ---
 
-## Dockerized Deployment
+## Frontend Pages
 
-FloatChat uses multi-stage Docker builds for optimized container images. Both the API and Frontend services can be run in separate containers.
+| Page | Source | Description |
+|---|---|---|
+| Home | `front.py` | Feature overview and statistics |
+| FloatChat | `chatbot_ui.py` | AI chatbot — calls the Flask API |
+| Map | `map_page.py` | Interactive ARGO trajectory map (demo data) |
+| Profile Comparison | `front.py` | Year-on-year variable comparison (demo SQLite) |
+| Depth-Time Plots | `timedepthplot.py` | Heatmap of depth vs time (demo SQLite) |
 
-### Building Docker Images
-
-#### Build API Image
-```bash
-cd api
-docker build -t floatchat-api:latest .
-```
-
-#### Build Frontend Image
-```bash
-cd frontend
-docker build -t floatchat-frontend:latest .
-```
-
-### Running the Containers
-
-#### Run API Container
-```bash
-docker run --rm -p 5000:5000 \
-  --env-file .env \
-  floatchat-api:latest
-```
-- API will be available at [http://localhost:5000](http://localhost:5000)
-- Ensure your `.env` file contains `GOOGLE_API_KEY` and database credentials
-
-#### Run Frontend Container
-```bash
-docker run --rm -p 8501:8501 \
-  --env-file .env \
-  floatchat-frontend:latest
-```
-- Frontend will be available at [http://localhost:8501](http://localhost:8501)
-- Ensure your `.env` file contains `QUERY_API` pointing to your API endpoint
-
-### Docker Compose (Recommended)
-
-For easier orchestration, you can use Docker Compose:
-
-```yaml
-version: '3.8'
-services:
-  api:
-    build: ./api
-    ports:
-      - "5000:5000"
-    env_file:
-      - .env
-    environment:
-      - DB_HOST=postgres
-    depends_on:
-      - postgres
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "8501:8501"
-    env_file:
-      - .env
-    depends_on:
-      - api
-
-  postgres:
-    image: postgres:13
-    environment:
-      POSTGRES_DB: floatchatai
-      POSTGRES_USER: floatchat_user
-      POSTGRES_PASSWORD: your_password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
-```
-
-Run with:
-```bash
-docker-compose up --build
-```
-
-### Docker Image Features
-
-- **Multi-stage builds**: Optimized image sizes by separating build and runtime stages
-- **Wheel-based installation**: Faster builds with pre-compiled Python packages
-- **Network resilience**: Configured with extended timeouts for slow network connections
-- **Production-ready**: Minimal runtime images with only necessary dependencies
+> [!NOTE]
+> The Map, Profile Comparison, and Depth-Time pages use synthetic demo data (SQLite `frontend/dummy.db`). Only the FloatChat chatbot page queries the real PostgreSQL database via the Flask API.
 
 ---
 
-## CI/CD Workflow (GitHub Actions)
+## PostgreSQL Schema
 
-File: `.github/workflows/ci.yml`
+```sql
+-- Ocean float profiles
+CREATE TABLE profiles (
+    id        SERIAL PRIMARY KEY,
+    n_prof    INTEGER,
+    juld      TIMESTAMP,
+    latitude  DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    embedding DOUBLE PRECISION[] NOT NULL
+);
 
-This workflow runs on every push or pull request to `main`:
-
-- **`test` job**
-  - Checks out the repository
-  - Installs Python 3.11 and project dependencies
-  - Runs `python -m compileall ...` as a lightweight syntax and import check
-
-- **`docker` job**
-  - Builds both API and Frontend Docker images using BuildKit
-  - Uses GitHub Actions cache for faster subsequent builds
-  - Pushes both images to GitHub Container Registry (`ghcr.io`) on successful pushes to `main`:
-    - `ghcr.io/<repo-name>-api:latest`
-    - `ghcr.io/<repo-name>-frontend:latest`
-
-### Pulling Images from GitHub Container Registry
-
-After a successful build, you can pull and run the images:
-
-```bash
-# Login to GitHub Container Registry
-echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-
-# Pull API image
-docker pull ghcr.io/<your-username>/<repo-name>-api:latest
-
-# Pull Frontend image
-docker pull ghcr.io/<your-username>/<repo-name>-frontend:latest
+-- Per-profile depth measurements
+CREATE TABLE profile_levels (
+    id         SERIAL PRIMARY KEY,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+    n_levels   INTEGER,
+    pres       DOUBLE PRECISION,  -- pressure (dbar)
+    temp       DOUBLE PRECISION,  -- temperature (°C)
+    psal       DOUBLE PRECISION,  -- salinity (PSU)
+    juld       TIMESTAMP
+);
+CREATE INDEX ON profile_levels(profile_id);
 ```
 
-### Customization Notes
-- To push to another registry (Docker Hub, AWS ECR, etc.), update the `REGISTRY`, `IMAGE_NAME`, and login step accordingly.
-- Add more quality gates (pytest, linting, etc.) by inserting steps into the `test` job.
-- Set additional secrets under the repository settings if you need third-party registry credentials.
-- The workflow uses separate build contexts for API and Frontend to optimize build times.
+---
+
+## Stopping the Application
+
+```powershell
+# In each terminal press:
+Ctrl+C
+```
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `Missing required environment variables` on API start | Confirm root `.env` exists with all five variables |
+| `connection refused` on port 5000 | API hasn't started yet; wait for the "Running on" message |
+| `Database error` on POST /query | Check PostgreSQL is running: `pg_isready -h localhost -p 5432` |
+| Gemini returns `(AI explanation unavailable)` | Your `GOOGLE_API_KEY` is absent, invalid, or quota-limited |
+| `StreamlitAPIException: set_page_config()` | You ran `chatbot_ui.py` directly; always run via `front.py` |
+| `dummy.db` not found | Run Streamlit from any directory — paths are now resolved absolutely |
+| Flask reloader triggers on unrelated files | Use `--no-reload` flag as shown in the run command above |
+
+---
+
+## Gemini API Key
+
+The chatbot page requires a valid Google Gemini API key (`GOOGLE_API_KEY` in `.env`). Without it:
+- The API still starts and responds to all requests
+- The `query_explain` field returns a fallback message instead of an AI explanation
+- All other endpoints (`GET /`, validation, DB queries) work normally
+
+Obtain a key at [Google AI Studio](https://aistudio.google.com/app/apikey).
+
+> [!WARNING]
+> A previously exposed credential was found in `api/fallback_query.py` (hardcoded DB password). This has been removed and replaced with `.env`-based loading. **You should rotate that database password** since it appeared in Git history. Instructions: `ALTER USER postgres PASSWORD 'new_password';` then update your `.env`.
+
+---
+
+## Security Notes
+
+- `.env`, `.venv/`, `__pycache__/`, `*.pyc`, and `frontend/dummy.db` are all listed in `.gitignore`
+- No secrets are printed in logs — only error categories and sanitised messages
+- Raw stack traces are never returned to API clients
+- CORS is enabled for local development (all origins); restrict in production
 
 ---
 
 ## Key Features
 
-### Natural Language Interface
-Ask questions in plain English about ocean data:
-- *"Show salinity profiles near the equator"*
-- *"Find temperature data near Mumbai"*
-- *"Compare ocean data at lat=-43.037, long=130"*
-- *"What's the salinity trend in the Pacific Ocean?"*
-
-### AI-Powered Search
-- **Semantic Search**: Find relevant data using meaning, not just keywords
-- **Vector Embeddings**: 384-dimensional embeddings for precise matching
-- **Hybrid Scoring**: Combines semantic similarity with geographic proximity
-- **Natural Language Explanations**: AI-generated explanations using Google Gemini
-
-###  Advanced Visualizations
-- **Interactive Maps**: Geospatial visualization of ARGO float trajectories
-- **Depth-Time Heatmaps**: Visualize ocean parameters across time and depth
-- **Profile Comparisons**: Side-by-side analysis of different ocean variables
-- **Real-time Charts**: Dynamic Plotly visualizations with hover details
-
-### Geospatial Intelligence
-- **Automatic Geocoding**: Convert place names to coordinates
-- **Location-Aware Filtering**: Filter data by geographic proximity
-- **Distance Calculations**: Find nearest float data to any location
-- **Coordinate Extraction**: Parse lat/long from natural language queries
+- **Semantic Search** — 384-dim embeddings from `all-MiniLM-L6-v2`
+- **Hybrid Scoring** — 70% semantic similarity + 30% geographic proximity
+- **Natural Language Geocoding** — "near Mumbai" resolves to coordinates via Nominatim
+- **Graceful Degradation** — works without Gemini; handles NULL/NaN measurements
+- **Demo Mode** — Map, comparison and depth-time pages work with no database
 
 ---
 
-## Usage Examples
+## Acknowledgements
 
-### Natural Language Queries
-
-```python
-# Example queries you can ask:
-"Show salinity profiles near the equator in March 2023"
-"Compare temperature in Arabian Sea last 6 months"  
-"Find temperature data at lat=-43.037, long=130"
-"Show me ocean data near Mumbai"
-"What's the salinity trend in the Pacific Ocean?"
-```
-
-### API Usage
-
-```python
-import requests
-import json
-
-# Query the API
-response = requests.post(QUERY_API, 
-                        json={"query": "Show salinity near the equator"})
-data = response.json()
-
-# Access results
-for profile in data:
-    print(f"Profile ID: {profile['profile_id']}")
-    print(f"Location: {profile['lat']}, {profile['lon']}")
-    print(f"Time: {profile['time']}")
-    print(f"AI Explanation: {profile['query_explain']}")
-    
-    # Access depth-level data
-    for level in profile['depth_levels']:
-        print(f"  Pressure: {level['pres']} dbar, "
-              f"Temperature: {level['temp']}°C, "
-              f"Salinity: {level['salinity']} PSU")
-```
-
-### Frontend Navigation
-
-The Streamlit frontend provides multiple pages:
-- **Home**: Welcome page with feature overview
-- **FloatChat**: AI-powered chat interface
-- **🗺Map**: Interactive geospatial visualizations
-- **Profile Comparison**: Side-by-side data analysis
-- **Depth-Time Plots**: Time series and heatmap analysis
-
----
-
-## ⚙️ Configuration
-
-### Database Configuration
-
-Update database credentials in the respective files:
-
-```python
-# api/main.py, ingestion/main.py
-DB_CONFIG = {
-    "host": "localhost",
-    "database": "floatchatai",
-    "user": "your_username", 
-    "password": "your_password"
-}
-```
-
-### API Configuration
-
-```python
-# api/query.py
-TOP_K = 1                    # Number of top results to return
-RADIUS_METERS = 50_000       # Search radius in meters
-MODEL_NAME = 'all-MiniLM-L6-v2'  # Sentence transformer model
-```
-
-### Frontend Configuration
-
-```python
-# frontend/chatbot_ui.py
-API_BASE_URL = "http://127.0.0.1:5000"(for local) # Backend API URL
-TIMEOUT_SECONDS = 30                     # Request timeout
-```
-
----
-
-## Data Format
-
-### Input Data
-- **NetCDF Files**: ARGO float data in standard NetCDF format
-- **Variables**: Temperature (TEMP), Salinity (PSAL), Pressure (PRES)
-- **Metadata**: Latitude, Longitude, Time (JULD), Platform Number
-
-### API Response Format
-
-```json
-{
-  "profile_id": 123,
-  "lat": -43.037,
-  "lon": 130.0,
-  "time": "2023-03-15 12:00:00",
-  "depth_levels": [
-    {"pres": 5.0, "temp": 18.5, "salinity": 35.2},
-    {"pres": 10.0, "temp": 18.3, "salinity": 35.1}
-  ],
-  "query_explain": "Based on your query about salinity near the equator, I found oceanographic data from the Indian Ocean. The surface temperature is around 26.3°C, but it gets cooler as you go deeper..."
-}
-```
-
----
-
-## Testing
-
-### Run Demo Mode
-The application includes a demo mode that works without a database:
-
-1. Start the frontend: `streamlit run frontend/front.py`
-2. Ask any ocean-related question (if you dont specify the data and time it will take the current date and time)
-3. The system will provide demo data with realistic ocean profiles
-
-### Test API Endpoints
-```bash
-# Health check
-curl http://localhost:5000/
-
-# Query test
-curl -X POST http://localhost:5000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Show salinity near the equator"}'
-```
-
----
-
-
-### Code Style
-- Follow PEP 8 guidelines
-- Use meaningful variable names
-- Add docstrings to functions
-- Include type hints where possible
-
----
-ollaboration Features** - Share and annotate findings
-
----
-
-## 🙏 Acknowledgments
-
-- **ARGO Program** - For providing the oceanographic data
-- **Streamlit** - For the amazing web framework
-- **Flask** - For the lightweight API framework
-- **PostgreSQL** - For the robust database system
-- **Sentence Transformers** - For the semantic search capabilities
-- **Google Gemini** - For natural language processing
-- **Hugging Face** - For the pre-trained models
-- **Plotly** - For the interactive visualizations
-- **Geopy** - For geocoding services
-
----
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/SyedOwais312/floatchat/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/SyedOwais312/floatchat/discussions)
-- **Email**: Contact the maintainer for direct support
+- [ARGO Program](https://argo.ucsd.edu/) — oceanographic data
+- [Streamlit](https://streamlit.io/) — frontend framework
+- [Flask](https://flask.palletsprojects.com/) — API framework
+- [Sentence Transformers](https://huggingface.co/sentence-transformers) — semantic embeddings
+- [Google Gemini](https://ai.google.dev/) — natural language explanations
+- [Plotly](https://plotly.com/) — interactive charts
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/Syedowais312/floatchat/blob/main/LICENSE) file for details.
-
----
-
-<div align="center">
-
-*Star ⭐ this repository if you find it helpful!*
-
-</div>
-
-## Example Output
-
-Here’s what FloatChat looks like in action:
-
-<div align="center">
-
-![Chat Interface Example](frontend/output_chat_example.png)  
-*FloatChat answering oceanographic queries in natural language*
-
-![Depth-Time Plot Example](frontend/output_depth_time.png)  
-*Interactive depth-time visualization of ARGO float data*
-
-</div>
+MIT — see [LICENSE](LICENSE)

@@ -12,6 +12,10 @@ psycopg2-binary==2.9.9
 numpy==1.26.4
 sentence-transformers==3.0.1
 
+# HTTP and Remote Data Provider
+requests>=2.31.0
+pandas>=2.2.0
+
 # Geographic calculations
 geopy==2.4.1
 
