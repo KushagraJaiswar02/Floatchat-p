@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import time
 import json
+import re
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
@@ -11,11 +12,11 @@ def is_ocean_data_query(user_input):
     """Check if the user input is related to ocean data."""
     keywords = [
         "ocean", "salinity", "temperature", "depth", "profile", "float", "sea", "pressure",
-        "current", "marine", "water", "chlorophyll", "ph", "conductivity", "argo", "latitude", "longitude"
+        "current", "marine", "water", "chlorophyll", "ph", "conductivity", "argo", "latitude",
+        "longitude", "psu", "dbar", "thermocline", "halocline", "pycnocline", "ctd", "wmo"
     ]
     user_input_lower = user_input.lower()
-    return any(word in user_input_lower for word in keywords)
-
+    return any(re.search(r"\b" + re.escape(word) + r"\b", user_input_lower) for word in keywords)
 def fall_back_query(user_input):
     """Respond to non-ocean-data queries."""
     return (
@@ -410,13 +411,16 @@ def show_chatbot_ui():
                         ai_response = data["query_explain"]
                         st.markdown(ai_response)
                         
-                        display_metadata(data)
+                        has_real_profile = bool(data.get("profile_id") or data.get("wmo_id") or data.get("lat") is not None)
+                        if has_real_profile:
+                            display_metadata(data)
                         
                         message_obj = {
                             "role": "assistant", 
                             "content": ai_response,
-                            "metadata": data 
                         }
+                        if has_real_profile:
+                            message_obj["metadata"] = data
                         
                         if "depth_levels" in data and data["depth_levels"]:
                             chart = create_ocean_data_charts(data["depth_levels"])

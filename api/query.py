@@ -33,10 +33,10 @@ from geopy.distance import distance
 from sentence_transformers import SentenceTransformer
 
 # Local modules
-from query_parser import parse_query, ParsedQuery
-from argo_provider import ArgoERDDAPProvider, ArgoFilters, ArgoProviderError
-from argo_cache import upsert_profiles, lookup_cached_profiles, is_cache_fresh
-from db_migration import run_migrations
+from api.query_parser import parse_query, ParsedQuery
+from api.argo_provider import ArgoERDDAPProvider, ArgoFilters, ArgoProviderError
+from api.argo_cache import upsert_profiles, lookup_cached_profiles, is_cache_fresh
+from api.db_migration import run_migrations
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -198,6 +198,76 @@ def llm_explain(user_query: str, profiles: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+
+def _answer_educational_query(user_query: str) -> str:
+    """
+    Provide a concise, scientifically accurate explanation of an oceanographic
+    concept without requiring search constraints or fabricating real float data.
+    """
+    q_lower = user_query.lower()
+
+    curated = [
+        (r"\btemp(?:erature)?\b", (
+            "Ocean temperature measures the heat content and thermal kinetic energy of seawater, "
+            "typically recorded in degrees Celsius (°C). In the ocean, solar radiation warms the surface "
+            "layer (0–100 m), below which lies the thermocline where temperatures decline sharply, "
+            "eventually reaching 1–4°C in the deep ocean."
+        )),
+        (r"\bsalinity\b", (
+            "Salinity describes the concentration of dissolved mineral salts (primarily sodium and chloride) "
+            "in seawater, measured on the Practical Salinity Scale in Practical Salinity Units (PSU). "
+            "Global open ocean salinity typically ranges between 33 and 37 PSU, influenced by surface evaporation, "
+            "precipitation, ice formation, and river inflows."
+        )),
+        (r"\bpres(?:sure)?\b", (
+            "In oceanography, pressure refers to hydrostatic pressure exerted by the weight of water above a sensor, "
+            "conventionally expressed in decibars (dbar). Because seawater density is approximately 1025 kg/m³, "
+            "1 dbar of pressure closely corresponds to 1 meter of depth (e.g. 1000 dbar is roughly 1000 meters)."
+        )),
+        (r"\bargo\s+float\b", (
+            "An Argo float is an autonomous, robotic ocean probe that drifts at depths of 1,000 to 2,000 meters. "
+            "Every 10 days, it adjusts its buoyancy using an internal hydraulic bladder to rise to the surface, "
+            "recording continuous profiles of temperature, salinity, and pressure. Upon surfacing, it transmits "
+            "the data via satellite to global data centres before descending to repeat the mission."
+        )),
+        (r"\bpsu\b", (
+            "PSU stands for Practical Salinity Unit, the dimensionless unit of the Practical Salinity Scale (PSS-78). "
+            "It is derived from the electrical conductivity ratio of seawater relative to a standard KCl solution at 15°C "
+            "and 1 atmosphere. Typical open ocean seawater has a salinity near 35 PSU."
+        )),
+        (r"\bthermocline\b", (
+            "The thermocline is the vertical transition zone in the water column where water temperature "
+            "drops significantly more rapidly with increasing depth than in the layers above or below, "
+            "acting as a barrier between warm surface waters and cold abyssal depths."
+        )),
+    ]
+
+    fallback_answer: str | None = None
+    for pattern, ans_text in curated:
+        if re.search(pattern, q_lower):
+            fallback_answer = ans_text
+            break
+
+    prompt = (
+        f'The user is asking an educational oceanography question: "{user_query}"\n\n'
+        "Provide a concise, scientifically accurate, and friendly educational explanation (2-3 paragraphs). "
+        "Explain the scientific principles and oceanographic significance (e.g. how it relates to seawater or Argo floats). "
+        "Do NOT invent or fabricate specific float numbers, measurements, or coordinates. "
+        "Keep the tone informative and accessible, and you may use emojis."
+    )
+    try:
+        response = gemini_model.generate_content(prompt)
+        if response and response.text and response.text.strip():
+            return response.text.strip()
+    except Exception as exc:
+        logger.warning("Gemini educational answer failed: %s", exc)
+
+    return fallback_answer or (
+        "In oceanography, this concept relates to fundamental physical and chemical properties of seawater "
+        "measured continuously by global observation platforms such as the international Argo float array."
+    )
+
+# ---------------------------------------------------------------------------
 # Numerical calculations
 # ---------------------------------------------------------------------------
 
@@ -274,6 +344,19 @@ def query_profiles(user_query: str) -> dict:
     retrieval_error: str | None = None
     profiles: list[dict] = []
     source_type = "empty"
+
+    # Educational intent returns pure explanation without database or network retrieval
+    if parsed.intent == "educational":
+        educational_ans = _answer_educational_query(user_query)
+        return {
+            "profiles": [],
+            "source_type": "educational",
+            "filters_used": {},
+            "stats": {},
+            "retrieval_error": None,
+            "ambiguities": [],
+            "educational_answer": educational_ans,
+        }
 
     conn = None
     try:
@@ -598,6 +681,23 @@ def query():
     try:
         result = query_profiles(user_query)
         result["_user_query"] = user_query
+
+        if result.get("educational_answer"):
+            return jsonify(
+                [
+                    {
+                        "profile_id": None,
+                        "lat": None,
+                        "lon": None,
+                        "time": None,
+                        "depth_levels": [],
+                        "query_explain": result["educational_answer"],
+                        "source": "educational",
+                        "cache_status": "none",
+                        "wmo_id": None,
+                    }
+                ]
+            )
 
         if result.get("ambiguities"):
             # Return clarification request

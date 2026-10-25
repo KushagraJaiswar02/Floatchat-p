@@ -26,7 +26,7 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from argo_regions import resolve_region
+from api.argo_regions import resolve_region
 
 logger = logging.getLogger("floatchat.argo_provider")
 

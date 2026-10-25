@@ -90,13 +90,14 @@ for k, v in {
 }.items():
     os.environ.setdefault(k, v)
 
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "api"))
 
-import argo_regions as regions_mod
-import argo_provider as provider_mod
-import query_parser as parser_mod
-import argo_cache as cache_mod
-import query as api_mod
+import api.argo_regions as regions_mod
+import api.argo_provider as provider_mod
+import api.query_parser as parser_mod
+import api.argo_cache as cache_mod
+import api.query as api_mod
 
 
 # ===========================================================================
@@ -359,8 +360,12 @@ class TestQueryParser(unittest.TestCase):
 
     def test_lat_lon_extraction(self):
         pq = parser_mod.parse_query("data at lat=-43.037, long=130")
-        self.assertAlmostEqual(pq.filters.min_lat, -43.037)
-        self.assertAlmostEqual(pq.filters.min_lon, 130.0)
+        # When a point is queried, it is bounded with default search radius (e.g. +/- 1.0 deg)
+        radius = parser_mod.DEFAULT_SEARCH_RADIUS_DEG
+        self.assertAlmostEqual(pq.filters.min_lat, -43.037 - radius)
+        self.assertAlmostEqual(pq.filters.max_lat, -43.037 + radius)
+        self.assertAlmostEqual(pq.filters.min_lon, 130.0 - radius)
+        self.assertAlmostEqual(pq.filters.max_lon, 130.0 + radius)
 
     def test_date_iso_extraction(self):
         pq = parser_mod.parse_query("profiles between 2026-01-01 and 2026-03-31")
