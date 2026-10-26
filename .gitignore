@@ -3,6 +3,7 @@ venv/
 node_modules/
 __pycache__/
 .env
+.env.local
 # Ignore Python virtual environments
 venv/
 .venv/
@@ -19,3 +20,4 @@ frontend/dummy.db
 .test-docker.sh
 .TESTING_GUIDE.md
 dummy.db
+.neon

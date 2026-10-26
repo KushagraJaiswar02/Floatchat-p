@@ -26,11 +26,21 @@ def fall_back_query(user_input):
     )
 
 
+def _get_query_api_url() -> str:
+    """Resolve backend query API URL with safe precedence: st.secrets -> os.getenv -> localhost fallback."""
+    try:
+        if hasattr(st, "secrets") and "QUERY_API" in st.secrets:
+            return st.secrets["QUERY_API"]
+    except Exception:
+        pass
+    return os.getenv("QUERY_API", "http://127.0.0.1:5000/query")
+
+
 def query_backend(user_query):
-    """Query the backend API at http://127.0.0.1:5000/query"""
+    """Query the backend API."""
     load_dotenv()
     try:
-        query_api = os.getenv("QUERY_API", default="http://127.0.0.1:5000/query")
+        query_api = _get_query_api_url()
 
         response = requests.post(
             query_api, 
