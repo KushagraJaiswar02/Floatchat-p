@@ -15,18 +15,23 @@ No raw stack traces to clients. No hardcoded credentials. CORS at module level.
 
 from __future__ import annotations
 
+from api.telemetry import timed, stage
+
 import json
 import logging
 import math
 import os
 import re
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from pathlib import Path
 
 import numpy as np
 import psycopg2
 import google.generativeai as genai
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify as flask_jsonify, g
+from api.telemetry import request_id
 from flask_cors import CORS
 from geopy.geocoders import Nominatim
 from geopy.distance import distance
@@ -112,6 +117,7 @@ class _LazyGeminiModel:
         self._real_instance = None
         self._configured = False
 
+    @timed("gemini_initialization")
     def _load(self):
         if self._real_instance is None:
             api_key = os.getenv("GOOGLE_API_KEY")
@@ -122,6 +128,7 @@ class _LazyGeminiModel:
             self._real_instance = genai.GenerativeModel(self._model_name)
         return self._real_instance
 
+    @timed("gemini_call")
     def generate_content(self, *args, **kwargs):
         return self._load().generate_content(*args, **kwargs)
 
@@ -141,6 +148,31 @@ _argo_provider = ArgoERDDAPProvider()
 app = Flask(__name__)
 CORS(app)
 
+
+@app.before_request
+def _start_request_timing():
+    g.timing_token = request_id.set(uuid4().hex)
+
+
+@app.after_request
+def _finish_request_timing(response):
+    response.headers["X-Request-ID"] = request_id.get()
+    logger.info("request_complete request_id=%s status=%s bytes=%s", request_id.get(),
+                response.status_code, response.calculate_content_length())
+    return response
+
+
+@app.teardown_request
+def _reset_request_timing(_error):
+    token = g.pop("timing_token", None)
+    if token is not None:
+        request_id.reset(token)
+
+
+@timed("response_serialization")
+def jsonify(*args, **kwargs):
+    return flask_jsonify(*args, **kwargs)
+
 # Keep these references for test patching compatibility
 import psycopg2 as _psycopg2  # noqa: F401 (used in tests via api_module.psycopg2)
 
@@ -149,6 +181,7 @@ import psycopg2 as _psycopg2  # noqa: F401 (used in tests via api_module.psycopg
 # Legacy helpers (kept for backward-compat and semantic search)
 # ---------------------------------------------------------------------------
 
+@timed("query_embedding")
 def get_embedding(text: str) -> list:
     res = _st_model.encode(text)
     return res.tolist() if hasattr(res, "tolist") else list(res)
@@ -189,6 +222,7 @@ def extract_lat_lon(user_query: str):
 # LLM explanation
 # ---------------------------------------------------------------------------
 
+@timed("gemini_explanation")
 def llm_explain(user_query: str, profiles: list[dict]) -> str:
     """
     Generate a conversational, data-grounded explanation via Gemini.
@@ -230,10 +264,10 @@ def llm_explain(user_query: str, profiles: list[dict]) -> str:
     )
 
     try:
-        response = gemini_model.generate_content(prompt)
+        response = gemini_model.generate_content(prompt, request_options={"timeout": 4, "retry": None})
         return response.text.strip()
     except Exception as exc:
-        logger.warning("Gemini call failed: %s", exc)
+        logger.warning("Gemini call failed: %s", type(exc).__name__)
         p = profiles[0]
         return (
             f"Found {len(profiles)} profile(s). First: WMO {p.get('wmo_id', '?')} "
@@ -245,6 +279,7 @@ def llm_explain(user_query: str, profiles: list[dict]) -> str:
 
 # ---------------------------------------------------------------------------
 
+@timed("gemini_educational")
 def _answer_educational_query(user_query: str) -> str:
     """
     Provide a concise, scientifically accurate explanation of an oceanographic
@@ -310,11 +345,11 @@ def _answer_educational_query(user_query: str) -> str:
         "Keep the tone informative and accessible, and you may use emojis."
     )
     try:
-        response = gemini_model.generate_content(prompt)
+        response = gemini_model.generate_content(prompt, request_options={"timeout": 4, "retry": None})
         if response and response.text and response.text.strip():
             return response.text.strip()
     except Exception as exc:
-        logger.warning("Gemini educational answer failed: %s", exc)
+        logger.warning("Gemini educational answer failed: %s", type(exc).__name__)
 
     return fallback_answer or (
         "In oceanography, this concept relates to fundamental physical and chemical properties of seawater "
@@ -362,17 +397,25 @@ def compute_stats(profiles: list[dict], variable: str, target_pres: float | None
 # Main query orchestration
 # ---------------------------------------------------------------------------
 
+@timed("db_connect")
 def _get_db_connection(timeout: int | None = None):
+    timeout = timeout if timeout is not None else 3
     if "dsn" in DB_CONFIG:
-        if timeout is not None:
-            return psycopg2.connect(DB_CONFIG["dsn"], connect_timeout=timeout)
-        return psycopg2.connect(DB_CONFIG["dsn"])
-    cfg = dict(DB_CONFIG)
-    if timeout is not None:
-        cfg["connect_timeout"] = timeout
-    return psycopg2.connect(**cfg)
+        conn = psycopg2.connect(DB_CONFIG["dsn"], connect_timeout=timeout)
+    else:
+        conn = psycopg2.connect(**{**DB_CONFIG, "connect_timeout": timeout})
+    try:
+        # Neon pooled endpoints reject statement_timeout in startup options.
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '3s'; SET lock_timeout = '1s'")
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
+@timed("query_pipeline")
 def query_profiles(user_query: str) -> dict:
     """
     Orchestrate the full retrieval pipeline for *user_query*.
@@ -388,19 +431,9 @@ def query_profiles(user_query: str) -> dict:
     if not user_query:
         raise ValueError("Empty query")
 
-    parsed = parse_query(user_query)
-    logger.info(
-        "Parsed query: intent=%s, wmo=%s, region=%s, lat=[%s,%s] lon=[%s,%s] dates=%s/%s",
-        parsed.intent,
-        parsed.filters.wmo_ids,
-        parsed.filters.region_name,
-        parsed.filters.min_lat,
-        parsed.filters.max_lat,
-        parsed.filters.min_lon,
-        parsed.filters.max_lon,
-        parsed.filters.date_start,
-        parsed.filters.date_end,
-    )
+    with stage("intent_classification"):
+        parsed = parse_query(user_query)
+    logger.info("Parsed query: intent=%s", parsed.intent)
 
     retrieval_error: str | None = None
     profiles: list[dict] = []
@@ -439,6 +472,20 @@ def query_profiles(user_query: str) -> dict:
             "educational_answer": educational_ans,
         }
 
+    # Undated region searches use a disclosed recent sample, not an all-history scan.
+    scope_note = ""
+    f = parsed.filters
+    if f.has_spatial_filter() and not f.has_temporal_filter() and not f.wmo_ids:
+        today = datetime.now(timezone.utc).date()
+        f.date_start = (today - timedelta(days=1)).isoformat()
+        f.date_end = today.isoformat()
+        f.max_profiles = min(f.max_profiles, TOP_K)
+        scope_note = (
+            f"Recent sample: searched {f.date_start} through {f.date_end} (UTC), "
+            f"returning up to {f.max_profiles} profiles with bounded depth levels. "
+            "Specify a date range to search another period. "
+        )
+
     conn = None
     try:
         conn = _get_db_connection()
@@ -447,7 +494,8 @@ def query_profiles(user_query: str) -> dict:
         try:
             run_migrations(conn)
         except Exception as exc:
-            logger.warning("Schema migration failed (continuing): %s", exc)
+            conn.rollback()
+            logger.warning("Schema migration failed (continuing): %s", type(exc).__name__)
 
         has_structured_filters = (
             parsed.filters.wmo_ids
@@ -471,7 +519,7 @@ def query_profiles(user_query: str) -> dict:
                 max_lon=f.max_lon,
                 date_start=f.date_start,
                 date_end=f.date_end,
-                max_results=TOP_K * 5,
+                max_results=TOP_K,
             )
 
             # Check freshness for WMO-specific queries
@@ -497,26 +545,18 @@ def query_profiles(user_query: str) -> dict:
 
                     if raw_profiles:
                         try:
-                            inserted, updated = upsert_profiles(conn, raw_profiles)
+                            inserted, updated = upsert_profiles(conn, raw_profiles, skip_embedding=True)
                             logger.info("Cached %d new, %d updated profiles", inserted, updated)
                         except Exception as exc:
-                            logger.error("Cache write failed: %s", exc)
+                            conn.rollback()
+                            logger.error("Cache write failed: %s", type(exc).__name__)
 
-                        # Re-query from cache to get normalised format
-                        profiles = lookup_cached_profiles(
-                            conn,
-                            wmo_ids=f.wmo_ids or None,
-                            min_lat=f.min_lat,
-                            max_lat=f.max_lat,
-                            min_lon=f.min_lon,
-                            max_lon=f.max_lon,
-                            date_start=f.date_start,
-                            date_end=f.date_end,
-                            max_results=TOP_K,
-                        )
-                        # Tag as live
-                        for p in profiles:
-                            p["cache_status"] = "live"
+                        # Serve the actual provider results even if the cache write fails.
+                        profiles = [
+                            {**p, "profile_id": None, "lat": p["latitude"], "lon": p["longitude"],
+                             "time": p["juld"].isoformat(), "cache_status": "live"}
+                            for p in raw_profiles[:TOP_K]
+                        ]
                         source_type = "live"
                     else:
                         logger.info("ERDDAP returned 0 profiles")
@@ -533,7 +573,8 @@ def query_profiles(user_query: str) -> dict:
         # ---------------------------------------------------------------
         # Path B: Semantic / embedding fallback
         # ---------------------------------------------------------------
-        if not profiles and (not has_structured_filters or ENABLE_LOCAL_FALLBACK):
+        # A recent regional sample must not fall back to unrelated, undated embeddings.
+        if not profiles and not retrieval_error and not scope_note and (not has_structured_filters or ENABLE_LOCAL_FALLBACK):
             profiles = _semantic_search(conn, user_query)
             if profiles:
                 source_type = "local"
@@ -571,9 +612,15 @@ def query_profiles(user_query: str) -> dict:
         "stats": stats,
         "retrieval_error": retrieval_error,
         "ambiguities": parsed.ambiguities,
+        "scope_note": scope_note,
+        "system_answer": (
+            scope_note + "No matching observations were found in this window."
+            if scope_note and not profiles and not retrieval_error else None
+        ),
     }
 
 
+@timed("semantic_search")
 def _semantic_search(
     conn: "psycopg2.extensions.connection",
     user_query: str,
@@ -586,7 +633,7 @@ def _semantic_search(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, latitude, longitude, juld, embedding, source, wmo_id "
-            "FROM profiles WHERE embedding IS NOT NULL LIMIT 200"
+            "FROM profiles WHERE embedding IS NOT NULL AND cardinality(embedding) > 0 LIMIT 200"
         )
         rows = cur.fetchall()
 
@@ -696,6 +743,7 @@ def _extract_target_pressure(query: str) -> float | None:
     return None
 
 
+@timed("response_format")
 def _format_response(result: dict) -> list[dict]:
     """
     Convert internal result dict to the frontend-compatible list format.
@@ -709,6 +757,7 @@ def _format_response(result: dict) -> list[dict]:
 
     user_query = result.get("_user_query", "")
     explain = llm_explain(user_query, profiles) if user_query else ""
+    explain = result.get("scope_note", "") + explain
 
     output = []
     for i, p in enumerate(profiles):
@@ -752,6 +801,7 @@ def home():
 
 
 @app.route("/query", methods=["POST"])
+@timed("request_total")
 def query():
     data = request.get_json(silent=True)
     if not data or not isinstance(data, dict):
@@ -810,7 +860,7 @@ def query():
                         "time": None,
                         "depth_levels": [],
                         "query_explain": (
-                            f"⚠️ Remote data retrieval failed: {result['retrieval_error']}. "
+                            f"{result.get('scope_note', '')}⚠️ Remote data retrieval failed: {result['retrieval_error']}. "
                             "Please try again later or refine your query."
                         ),
                         "source": "error",
@@ -883,7 +933,7 @@ def refresh():
         raw = _argo_provider.fetch_profiles(parsed.filters)
         if not raw:
             return jsonify({"refreshed": 0, "message": "No profiles found"})
-        inserted, updated = upsert_profiles(conn, raw)
+        inserted, updated = upsert_profiles(conn, raw, skip_embedding=True)
         return jsonify({"refreshed": inserted + updated, "inserted": inserted, "updated": updated})
     except ArgoProviderError as exc:
         return jsonify({"error": str(exc)}), 502

@@ -10,6 +10,8 @@ Run once before starting the live integration:
 
 from __future__ import annotations
 
+from api.telemetry import timed
+
 import logging
 import os
 from pathlib import Path
@@ -140,6 +142,7 @@ _MIGRATIONS: list[tuple[str, str]] = [
 ]
 
 
+@timed("db_migrations")
 def run_migrations(conn: "psycopg2.extensions.connection") -> None:
     """Apply all pending migrations in order."""
     with conn.cursor() as cur:

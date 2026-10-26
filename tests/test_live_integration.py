@@ -296,6 +296,7 @@ class TestProviderFetch(unittest.TestCase):
         resp = MagicMock()
         resp.status_code = status
         resp.text = text
+        resp.raw.read1.side_effect = [text.encode("utf-8"), b""]
         return resp
 
     def test_fetch_returns_profiles_on_200(self):

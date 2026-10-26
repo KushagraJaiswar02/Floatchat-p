@@ -10,6 +10,8 @@ Guarantees:
 
 from __future__ import annotations
 
+from api.telemetry import timed
+
 import gc
 import logging
 import os
@@ -22,6 +24,7 @@ _model_lock = threading.Lock()
 _shared_st_instance: Optional[Any] = None
 
 
+@timed("model_initialization")
 def get_shared_sentence_transformer(model_name: str = "all-MiniLM-L6-v2") -> Any:
     """Return the shared SentenceTransformer singleton, creating it safely if needed."""
     global _shared_st_instance

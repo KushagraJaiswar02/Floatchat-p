@@ -7,6 +7,8 @@ Provides cache lookup before remote fetch, freshness checks, and provenance trac
 
 from __future__ import annotations
 
+from api.telemetry import timed
+
 import json
 import logging
 import math
@@ -35,6 +37,7 @@ def _get_embedding_model() -> Any:
     return get_shared_sentence_transformer("all-MiniLM-L6-v2")
 
 
+@timed("cache_embedding")
 def _make_embedding(wmo_id: str, lat: float, lon: float, juld: datetime) -> list[float]:
     """Generate an embedding for a profile (used for semantic search)."""
     desc = (
@@ -48,6 +51,7 @@ def _make_embedding(wmo_id: str, lat: float, lon: float, juld: datetime) -> list
 # Cache operations
 # ---------------------------------------------------------------------------
 
+@timed("db_cache_write")
 def upsert_profiles(
     conn: "psycopg2.extensions.connection",
     profiles: list[dict],
@@ -83,7 +87,9 @@ def upsert_profiles(
                     embedding = _make_embedding(wmo_id, lat, lon, juld)
                 except Exception as exc:
                     logger.warning("Embedding failed for WMO %s: %s", wmo_id, exc)
-                    embedding = [0.0] * 384
+                    embedding = []
+            if embedding is None:
+                embedding = []  # NOT NULL schema; empty means not yet embedded.
 
             # ---------- Upsert profile row ----------
             cur.execute(
@@ -100,7 +106,8 @@ def upsert_profiles(
                     source_url   = EXCLUDED.source_url,
                     retrieved_at = EXCLUDED.retrieved_at,
                     data_mode    = EXCLUDED.data_mode,
-                    embedding    = EXCLUDED.embedding
+                    embedding    = CASE WHEN cardinality(EXCLUDED.embedding) > 0
+                                   THEN EXCLUDED.embedding ELSE profiles.embedding END
                 RETURNING id,
                     (xmax = 0) AS was_inserted
                 """,
@@ -168,6 +175,7 @@ def upsert_profiles(
     return inserted, updated
 
 
+@timed("db_cache_lookup")
 def lookup_cached_profiles(
     conn: "psycopg2.extensions.connection",
     wmo_ids: list[str] | None = None,
@@ -319,6 +327,7 @@ def lookup_cached_profiles(
     return results
 
 
+@timed("db_cache_freshness")
 def is_cache_fresh(
     conn: "psycopg2.extensions.connection",
     wmo_ids: list[str],

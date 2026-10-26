@@ -14,6 +14,8 @@ Column names (all lowercase in ERDDAP ArgoFloats):
 
 from __future__ import annotations
 
+from api.telemetry import timed
+
 import logging
 import math
 import os
@@ -21,10 +23,12 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
+from time import monotonic
 from typing import Optional
 
 import pandas as pd
 import requests
+from urllib3.exceptions import HTTPError as UpstreamHTTPError
 
 from api.argo_regions import resolve_region
 
@@ -38,7 +42,9 @@ ERDDAP_BASE = os.getenv(
     "ARGO_ERDDAP_BASE",
     "https://erddap.ifremer.fr/erddap/tabledap/ArgoFloats",
 )
-ERDDAP_TIMEOUT = int(os.getenv("ARGO_ERDDAP_TIMEOUT", "30"))
+ERDDAP_TIMEOUT = min(float(os.getenv("ARGO_ERDDAP_TIMEOUT", "10")), 12.0)
+ERDDAP_CONNECT_TIMEOUT = 3
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_PROFILES = int(os.getenv("ARGO_MAX_PROFILES", "20"))
 
 # Request only required columns to minimise payload
@@ -86,9 +92,9 @@ class ArgoFilters:
             if bbox:
                 self.min_lat, self.max_lat = bbox[0], bbox[1]
                 self.min_lon, self.max_lon = bbox[2], bbox[3]
-                logger.info("Region %r → bbox %s", self.region_name, bbox)
+                logger.debug("Named region resolved")
             else:
-                logger.warning("Unknown named region: %r", self.region_name)
+                logger.warning("Unknown named region")
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -137,6 +143,7 @@ class ArgoERDDAPProvider:
       4. Return normalised list of profile dicts
     """
 
+    @timed("erddap_request")
     def fetch_profiles(self, filters: ArgoFilters) -> list[dict]:
         """
         Fetch profiles matching *filters* from ERDDAP.
@@ -159,34 +166,49 @@ class ArgoERDDAPProvider:
             )
 
         url = self._build_url(filters)
-        logger.info("ERDDAP fetch: %s", url)
+        text = self._request_csv(url)
+        return self._parse_csv(text, url)[:filters.max_profiles]
 
+    @timed("erddap_http")
+    def _request_csv(self, url: str) -> str:
+        # No retries, redirects, pagination, or sequential retry fan-out in /query.
+        started = monotonic()
+        resp = None
         try:
-            resp = requests.get(url, timeout=ERDDAP_TIMEOUT, stream=False)
+            resp = requests.get(url, timeout=(ERDDAP_CONNECT_TIMEOUT, ERDDAP_TIMEOUT),
+                                stream=True, allow_redirects=False)
+            if resp.status_code == 404:
+                return ""
+            if resp.status_code != 200:
+                raise ArgoProviderError(f"ERDDAP HTTP {resp.status_code}. Please try again later.")
+            chunks = []
+            size = 0
+            while True:
+                if monotonic() - started > ERDDAP_CONNECT_TIMEOUT + ERDDAP_TIMEOUT:
+                    raise ArgoProviderError("ERDDAP download timed out. Use a shorter date range.")
+                # read1 returns available bytes after one socket read, so a slow
+                # trickle cannot keep a large iter_content chunk waiting forever.
+                chunk = resp.raw.read1(64 * 1024, decode_content=True)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_RESPONSE_BYTES:
+                    raise ArgoProviderError("ERDDAP response exceeded the safe size limit. Use a smaller area or date range.")
+                chunks.append(chunk)
+            return b"".join(chunks).decode("utf-8")
         except requests.exceptions.Timeout:
-            raise ArgoProviderError(
-                f"ERDDAP timed out after {ERDDAP_TIMEOUT}s. "
-                "Use a smaller area or shorter date range."
-            )
-        except requests.exceptions.ConnectionError as exc:
-            raise ArgoProviderError(f"Cannot reach ERDDAP: {exc}")
+            raise ArgoProviderError(f"ERDDAP timed out (connect limit {ERDDAP_CONNECT_TIMEOUT}s, read limit {ERDDAP_TIMEOUT:g}s). Use a shorter date range.") from None
+        except (requests.exceptions.RequestException, UpstreamHTTPError):
+            raise ArgoProviderError("Cannot reach ERDDAP or its response was interrupted. Please try again later.") from None
+        finally:
+            if resp is not None:
+                resp.close()
 
-        if resp.status_code == 404:
-            logger.info("ERDDAP 404 — no data for filters")
-            return []
-        if resp.status_code != 200:
-            # ERDDAP returns human-readable error in body
-            snippet = resp.text[:500]
-            raise ArgoProviderError(
-                f"ERDDAP HTTP {resp.status_code}: {snippet}"
-            )
-
-        return self._parse_csv(resp.text, url)
-
+    @timed("erddap_multi_request")
     def fetch_multiple_wmo(self, filters: ArgoFilters) -> list[dict]:
         """
         Fetch multiple WMO IDs using ERDDAP regex constraint.
-        Falls back to sequential fetch if regex fails.
+        Fails promptly if the upstream regex request fails.
         """
         if not filters.wmo_ids:
             return self.fetch_profiles(filters)
@@ -209,23 +231,8 @@ class ArgoERDDAPProvider:
         url = self._build_url(regex_filter, extra_constraints=[
             f'platform_number=~"^({wmo_pattern})$"'
         ])
-        logger.info("ERDDAP multi-WMO fetch: %s", url)
-
-        try:
-            resp = requests.get(url, timeout=ERDDAP_TIMEOUT)
-        except requests.exceptions.Timeout:
-            raise ArgoProviderError("ERDDAP timed out")
-        except requests.exceptions.ConnectionError as exc:
-            raise ArgoProviderError(f"Cannot reach ERDDAP: {exc}")
-
-        if resp.status_code == 404:
-            return []
-        if resp.status_code != 200:
-            # Fallback: sequential
-            logger.warning("Regex fetch failed (%s), falling back to sequential", resp.status_code)
-            return self._sequential_fetch(filters)
-
-        return self._parse_csv(resp.text, url)
+        text = self._request_csv(url)
+        return self._parse_csv(text, url)[:filters.max_profiles]
 
     # ------------------------------------------------------------------
 
@@ -266,28 +273,7 @@ class ArgoERDDAPProvider:
         # Use .csvp: first row is "varname (units)" — simpler to parse
         return f"{ERDDAP_BASE}.csvp?{vars_part}&{constraint_str}"
 
-    def _sequential_fetch(self, filters: ArgoFilters) -> list[dict]:
-        """Fetch WMO IDs one by one when regex fetch is unavailable."""
-        results: list[dict] = []
-        for wmo in filters.wmo_ids:
-            single = ArgoFilters(
-                wmo_ids=[wmo],
-                min_lat=filters.min_lat,
-                max_lat=filters.max_lat,
-                min_lon=filters.min_lon,
-                max_lon=filters.max_lon,
-                date_start=filters.date_start,
-                date_end=filters.date_end,
-                max_profiles=filters.max_profiles,
-            )
-            try:
-                results.extend(self.fetch_profiles(single))
-            except ArgoProviderError as exc:
-                logger.warning("Sequential fetch WMO %s failed: %s", wmo, exc)
-            if len(results) >= filters.max_profiles:
-                break
-        return results[: filters.max_profiles]
-
+    @timed("erddap_parse")
     def _parse_csv(self, text: str, source_url: str) -> list[dict]:
         """
         Parse ERDDAP .csvp response.

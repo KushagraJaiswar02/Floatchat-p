@@ -22,13 +22,8 @@ def main():
     # Enforce CPU & single-thread execution for PyTorch to minimize memory footprint
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
-    try:
-        import torch
-        torch.set_num_threads(1)
-        if hasattr(torch, "set_num_interop_threads"):
-            torch.set_num_interop_threads(1)
-    except Exception:
-        pass
+    # model_manager applies PyTorch thread limits if semantic search needs it.
+    # Importing torch here consumes most of a 512 MiB worker before any query.
 
     port_str = os.environ.get("PORT", "10000")
     try:

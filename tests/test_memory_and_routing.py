@@ -14,6 +14,9 @@ from api.model_manager import get_shared_sentence_transformer, _model_lock
 from api.query_parser import parse_query
 import api.query as query_mod
 import api.argo_cache as cache_mod
+import api.argo_provider as provider_mod
+from datetime import datetime, timezone
+import requests
 
 
 CONCEPT_QUERY = "What is the difference between sea surface temperature and temperature at 1000 metres depth?"
@@ -87,7 +90,9 @@ class TestProductionIntentRouting(unittest.TestCase):
             stack.enter_context(patch.object(query_mod, "ENABLE_LOCAL_FALLBACK", False))
             response = query_mod.app.test_client().post("/query", json={"query": OBSERVATION_QUERY})
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.get_json(), [])  # Empty provider results must stay empty.
+            item = response.get_json()[0]
+            self.assertEqual(item["depth_levels"], [])
+            self.assertIn("No matching observations", item["query_explain"])
             cache.assert_called_once()
             fetch.assert_called_once()
             filters = fetch.call_args.args[0]
@@ -104,6 +109,141 @@ class TestProductionIntentRouting(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("specify a location", response.get_json()[0]["query_explain"])
             db.assert_not_called()
+
+
+class TestRetrievalTimeoutRegression(unittest.TestCase):
+    def setUp(self):
+        self.conn = MagicMock()
+        self.raw = {
+            "wmo_id": "6902746", "juld": datetime(2026, 10, 26, tzinfo=timezone.utc),
+            "latitude": -10.0, "longitude": 70.0, "source": "erddap_ifremer",
+            "source_url": "https://example.test/fixture.csvp", "data_mode": "R",
+            "depth_levels": [{"pres": 10.0, "temp": 20.0, "psal": 35.0}],
+        }  # Unit-test fixture; production always uses the provider's observations.
+
+    def route(self, stack, text=OBSERVATION_QUERY, raw=None):
+        stack.enter_context(patch.object(query_mod, "_get_db_connection", return_value=self.conn))
+        stack.enter_context(patch.object(query_mod, "run_migrations"))
+        stack.enter_context(patch.object(query_mod, "lookup_cached_profiles", return_value=[]))
+        stack.enter_context(patch.object(query_mod, "ENABLE_LIVE_FETCH", True))
+        stack.enter_context(patch.object(query_mod, "ENABLE_LOCAL_FALLBACK", True))
+        self.fetch = stack.enter_context(patch.object(query_mod._argo_provider, "fetch_profiles", return_value=raw or [self.raw]))
+        self.write = stack.enter_context(patch.object(query_mod, "upsert_profiles", return_value=(1, 0)))
+        self.semantic = stack.enter_context(patch.object(query_mod, "_semantic_search"))
+        self.embedding = stack.enter_context(patch.object(cache_mod, "_make_embedding"))
+        self.gemini = stack.enter_context(patch.object(query_mod.gemini_model, "generate_content", side_effect=RuntimeError("offline")))
+        return query_mod.app.test_client().post("/query", json={"query": text}, headers={"Content-Type": "application/json"})
+
+    def test_broad_query_returns_real_provider_data_without_model(self):
+        with ExitStack() as stack:
+            response = self.route(stack)
+            self.assertEqual(response.status_code, 200)
+            item = response.get_json()[0]
+            self.assertEqual(item["source"], "erddap_ifremer")
+            self.assertEqual(item["wmo_id"], self.raw["wmo_id"])
+            self.assertEqual(item["depth_levels"], self.raw["depth_levels"])
+            self.assertIn("Recent sample:", item["query_explain"])
+            f = self.fetch.call_args.args[0]
+            self.assertIsNotNone(f.date_start)
+            self.assertIsNotNone(f.date_end)
+            self.assertEqual(f.max_profiles, query_mod.TOP_K)
+            self.write.assert_called_once_with(self.conn, [self.raw], skip_embedding=True)
+            self.embedding.assert_not_called()
+            self.semantic.assert_not_called()
+            self.assertEqual(self.gemini.call_args.kwargs["request_options"], {"timeout": 4, "retry": None})
+            self.assertTrue(response.headers["X-Request-ID"])
+
+    def test_explicit_dates_are_preserved(self):
+        with ExitStack() as stack:
+            self.route(stack, OBSERVATION_QUERY + " between 2020-01-01 and 2020-02-01")
+            f = self.fetch.call_args.args[0]
+            self.assertEqual((f.date_start, f.date_end), ("2020-01-01", "2020-02-01"))
+
+    def test_timeout_returns_frontend_error_without_semantic_model(self):
+        with ExitStack() as stack:
+            self.route(stack)  # Set up the same route, then reproduce its upstream failure.
+            self.fetch.side_effect = provider_mod.ArgoProviderError("ERDDAP timed out")
+            self.semantic.reset_mock()
+            self.gemini.reset_mock()
+            response = query_mod.app.test_client().post("/query", json={"query": OBSERVATION_QUERY})
+            self.assertEqual(response.status_code, 200)
+            item = response.get_json()[0]
+            self.assertEqual(item["source"], "error")
+            self.assertEqual(item["depth_levels"], [])
+            self.assertIn("ERDDAP timed out", item["query_explain"])
+            self.semantic.assert_not_called()
+            self.gemini.assert_not_called()
+
+    def test_cache_write_failure_still_serves_observations(self):
+        with ExitStack() as stack:
+            self.route(stack)
+            self.write.side_effect = RuntimeError("cache unavailable")
+            response = query_mod.app.test_client().post("/query", json={"query": OBSERVATION_QUERY})
+            self.assertEqual(response.get_json()[0]["wmo_id"], self.raw["wmo_id"])
+            self.conn.rollback.assert_called_once()
+
+    def test_skip_embedding_is_valid_for_not_null_schema(self):
+        self.conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (42, True)
+        with patch.object(cache_mod, "_make_embedding") as embed, patch.object(cache_mod.psycopg2.extras, "execute_batch"):
+            cache_mod.upsert_profiles(self.conn, [self.raw], skip_embedding=True)
+            embed.assert_not_called()
+            call = self.conn.cursor.return_value.__enter__.return_value.execute.call_args
+            self.assertEqual(call.args[1][-2], [])
+            self.assertIn("ELSE profiles.embedding", call.args[0])
+
+    def test_upstream_timeout_is_bounded_and_not_retried(self):
+        for exc in (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout):
+            with self.subTest(error=exc.__name__), patch("requests.get", side_effect=exc) as get:
+                with self.assertRaises(provider_mod.ArgoProviderError):
+                    provider_mod.ArgoERDDAPProvider().fetch_profiles(provider_mod.ArgoFilters(region_name="indian ocean"))
+                get.assert_called_once()
+                self.assertEqual(get.call_args.kwargs["timeout"][0], 3)
+                self.assertLessEqual(get.call_args.kwargs["timeout"][1], 12)
+                self.assertTrue(get.call_args.kwargs["stream"])
+                self.assertFalse(get.call_args.kwargs["allow_redirects"])
+
+    def test_download_byte_limit_closes_response(self):
+        response = MagicMock(status_code=200)
+        response.raw.read1.side_effect = [b"x" * 11, b""]
+        with patch("requests.get", return_value=response), patch.object(provider_mod, "MAX_RESPONSE_BYTES", 10):
+            with self.assertRaisesRegex(provider_mod.ArgoProviderError, "safe size limit"):
+                provider_mod.ArgoERDDAPProvider()._request_csv("https://example.test/fixture")
+        response.close.assert_called_once()
+
+    def test_download_deadline_closes_response(self):
+        response = MagicMock(status_code=200)
+        response.raw.read1.side_effect = [b"x", b""]
+        with patch("requests.get", return_value=response), patch.object(provider_mod, "monotonic", side_effect=[0, 60]):
+            with self.assertRaisesRegex(provider_mod.ArgoProviderError, "timed out"):
+                provider_mod.ArgoERDDAPProvider()._request_csv("https://example.test/fixture")
+        response.close.assert_called_once()
+
+    def test_partial_download_error_is_not_silently_empty(self):
+        response = MagicMock(status_code=200)
+        response.raw.read1.side_effect = requests.exceptions.ChunkedEncodingError("interrupted")
+        with patch("requests.get", return_value=response):
+            with self.assertRaises(provider_mod.ArgoProviderError):
+                provider_mod.ArgoERDDAPProvider()._request_csv("https://example.test/fixture")
+        response.close.assert_called_once()
+
+    def test_multi_wmo_failure_does_not_fan_out_retries(self):
+        response = MagicMock(status_code=503)
+        with patch("requests.get", return_value=response) as get:
+            with self.assertRaises(provider_mod.ArgoProviderError):
+                provider_mod.ArgoERDDAPProvider().fetch_multiple_wmo(provider_mod.ArgoFilters(wmo_ids=["6902746", "5901234"]))
+            get.assert_called_once()
+        response.close.assert_called_once()
+
+    def test_timing_logs_do_not_contain_query(self):
+        with self.assertLogs("floatchat.timing", level="INFO") as logs:
+            with ExitStack() as stack:
+                self.route(stack)
+        output = " ".join(logs.output)
+        self.assertNotIn(OBSERVATION_QUERY, output)
+        for stage_name in ("intent_classification", "response_format", "response_serialization", "request_total"):
+            self.assertIn("stage=" + stage_name, output)
+        self.assertIn("elapsed_ms=", output)
+        self.assertIn("peak_rss_mib=", output)
 
 
 class TestModelManagerAndRouting(unittest.TestCase):
