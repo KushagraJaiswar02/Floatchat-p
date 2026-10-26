@@ -40,6 +40,23 @@ The Streamlit frontend and its 30-second timeout are unchanged. API responses re
 - `python -m compileall -q api frontend ingestion` and `git diff --check` passed.
 - Regression coverage includes successful structured retrieval without embeddings, preserved explicit dates, upstream connect/read errors, interrupted/oversized/expired downloads, response closure, no multi-float retry fan-out, cache-write failure, NOT NULL embedding handling, Gemini timeout options, and payload-free timing logs. Existing intent and memory tests remain enabled.
 
-Production rollout and memory verification must use the resulting Render deploy, its request IDs, process peak RSS, container memory metrics, and events; local Windows measurements do not establish Render memory usage.
+## Production verification
+
+Code commit `99375d18c8109f3ed932dcbda5ba311b5ffa700f` deployed automatically to service `srv-dbfl6ee7bikc73e05gqg`. Render deploy `dep-dbfo93vavr4c739b65o0` became **live at 2026-10-26T16:55:14Z** (22:25:14 IST). Worker instance: `srv-dbfl6ee7bikc73e05gqg-97mbv`, PID 57.
+
+| Request | Client elapsed | Backend elapsed | Result |
+| --- | ---: | ---: | --- |
+| Exact reported question | 5.764 s | 5.016 s | HTTP 200; cache hit containing real Ifremer WMO 1902052, temperature 27.913 °C and salinity 34.5366 at 1.04 dbar; observation 2026-10-26T03:59:09Z |
+| Same question plus `on 2026-10-24` | 14.281 s | 13.135 s | HTTP 200; cache miss → ERDDAP → parse → cache write; returned 3 real profiles, WMOs 1901843, 1902029, 1902201 |
+
+Request IDs: `31fa952e328c4fedba8ae3465e09beec` (exact question), `b1bed2f76ea64776b58216259548beb4` (uncached dated request). The uncached request's ERDDAP HTTP stage took 6.596 s, CSV parsing 3.074 s, and cache write 2.052 s. Eight profiles from 6,000 bounded rows were cached; the frontend response contained the configured top three and 15 levels per profile. There were no embedding/model-initialization or semantic-search stages on either request.
+
+**Memory during verification:** the new worker's Linux process peak RSS reached **174.1 MiB** after retrieval. Render container memory samples (30 s resolution) ranged from 215,789,570 to **221,065,220 bytes (210.8 MiB)**, below the reported **536,870,900-byte (512 MiB)** limit. These are measured values for this verification, not a guarantee for every future workload. No worker-failure or restart events occurred from the deploy becoming live through the verification window.
+
+Gemini failed with `DeadlineExceeded` on the exact question and `ResourceExhausted` on the dated request. Both failures were logged; the API retained real observations and returned its existing deterministic explanation fallback. The provider/quota issue remains separate from Argo retrieval.
+
+Changed source files: `api/query.py`, `api/argo_provider.py`, `api/argo_cache.py`, `api/model_manager.py`, `api/db_migration.py`, new `api/telemetry.py`, and `run_server.py`. Updated tests: `tests/test_memory_and_routing.py`, `tests/test_live_integration.py`. No frontend files or dependency versions changed.
+
+[Render service](https://dashboard.render.com/web/srv-dbfl6ee7bikc73e05gqg) · [Live API](https://floatchat-p.onrender.com)
 
 Reference: [ERDDAP tabledap orderByLimit documentation](https://coastwatch.pfeg.noaa.gov/erddap/tabledap/documentation.html).
