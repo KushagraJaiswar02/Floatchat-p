@@ -253,6 +253,14 @@ def _answer_educational_query(user_query: str) -> str:
     q_lower = user_query.lower()
 
     curated = [
+        (r"\bsea surface temperature\b.*\b1000\s*(?:metres|meters|m)\b", (
+            "Sea surface temperature describes the ocean's uppermost layer, which responds strongly "
+            "to sunlight, weather, and seasonal heating. Temperature at 1000 metres describes water "
+            "well below the surface, usually below the main thermocline, where direct solar heating "
+            "is negligible and temperatures generally change more slowly. Deep water is usually "
+            "colder, but the actual difference depends on location, season, and circulation. "
+            "This is a conceptual explanation; no float observations have been retrieved."
+        )),
         (r"\btemp(?:erature)?\b", (
             "Ocean temperature measures the heat content and thermal kinetic energy of seawater, "
             "typically recorded in degrees Celsius (°C). In the ocean, solar radiation warms the surface "
@@ -397,6 +405,26 @@ def query_profiles(user_query: str) -> dict:
     retrieval_error: str | None = None
     profiles: list[dict] = []
     source_type = "empty"
+
+    # Resolve non-data requests and validation before opening a DB connection.
+    system_answers = {
+        "greeting": "Hello! I can explain ocean science or help find real Argo float observations. What would you like to explore?",
+        "ui_action": (
+            "I can't open pages or interact with the browser from this chat backend. "
+            "You can open the Map page yourself, use its zoom controls, drag to pan, "
+            "and hover over any available markers. I haven't performed these actions."
+        ),
+    }
+    if parsed.intent in system_answers or parsed.ambiguities:
+        return {
+            "profiles": [],
+            "source_type": "system",
+            "filters_used": {},
+            "stats": {},
+            "retrieval_error": None,
+            "ambiguities": parsed.ambiguities,
+            "system_answer": system_answers.get(parsed.intent),
+        }
 
     # Educational intent returns pure explanation without database or network retrieval
     if parsed.intent == "educational":
@@ -737,7 +765,7 @@ def query():
         result = query_profiles(user_query)
         result["_user_query"] = user_query
 
-        if result.get("educational_answer"):
+        if result.get("educational_answer") or result.get("system_answer"):
             return jsonify(
                 [
                     {
@@ -746,8 +774,8 @@ def query():
                         "lon": None,
                         "time": None,
                         "depth_levels": [],
-                        "query_explain": result["educational_answer"],
-                        "source": "educational",
+                        "query_explain": result.get("educational_answer") or result["system_answer"],
+                        "source": result["source_type"],
                         "cache_status": "none",
                         "wmo_id": None,
                     }

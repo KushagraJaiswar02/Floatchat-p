@@ -130,7 +130,7 @@ class ParsedQuery:
     filters: ArgoFilters
     variables: list[str]             # ocean vars of interest
     is_argo_query: bool              # True if query is oceanographic
-    intent: str                      # "profile_search" | "numerical_answer" | "comparison"
+    intent: str                      # educational, greeting, ui_action, or data intent
     raw_query: str
     ambiguities: list[str]           # validation errors or clarification requests
 
@@ -391,11 +391,29 @@ def parse_query(user_query: str) -> ParsedQuery:
     is_edu_phrase = bool(re.search(edu_pattern, q_lower))
 
     has_constraints = bool(wmo_ids or min_lat is not None or region_name is not None or date_start)
+    # Definitions may mention depth; requests for statistics/observations still need data.
+    asks_for_data = bool(re.search(
+        r"\b(?:average|min|max|minimum|maximum)\b|\bmean\s+(?:temp\w*|salinity|psal|pressure|pres)\b", q_lower
+    )) or (
+        has_constraints and bool(re.search(r"\b(?:observations?|profiles?|measurements?)\b", q_lower))
+    )
 
-    if has_calc_intent:
-        intent = "numerical_answer"
-    elif is_edu_phrase and is_argo and not has_retrieval_verb:
+    # Standalone greetings must not swallow a following ocean-data request.
+    is_greeting = bool(re.fullmatch(r"(?:hello|hi|hey|good\s+(?:morning|afternoon|evening))[\s!?.]*", q_lower))
+    is_ui_action = bool(re.search(
+        r"\b(?:open|navigate\s+to|go\s+to)\s+(?:the\s+)?(?:map|\w+\s+page)\b"
+        r"|\b(?:click|zoom(?:ing)?|pan(?:ning)?|hover(?:ing)?)\b",
+        q_lower,
+    ))
+
+    if is_greeting:
+        intent = "greeting"
+    elif is_ui_action:
+        intent = "ui_action"
+    elif is_edu_phrase and is_argo and not has_retrieval_verb and not asks_for_data:
         intent = "educational"
+    elif has_calc_intent:
+        intent = "numerical_answer"
     elif any(w in q_lower for w in ["compare", "comparison", "versus", "vs", "difference"]):
         intent = "comparison"
     else:
@@ -403,8 +421,8 @@ def parse_query(user_query: str) -> ParsedQuery:
 
     # --- 8. Handle missing constraints / clarifications ---
     if is_argo and not ambiguities:
-        if intent == "educational":
-            # Educational questions do NOT require spatial/temporal/WMO constraints
+        if intent in ("educational", "greeting", "ui_action"):
+            # Non-data requests do NOT require spatial/temporal/WMO constraints.
             pass
         elif not has_constraints:
             if variables:
