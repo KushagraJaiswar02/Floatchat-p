@@ -53,21 +53,28 @@ logger = logging.getLogger("floatchat.api")
 ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
 
-_REQUIRED_VARS = ("HOST_NAME", "DATABASE_NAME", "USER_NAME", "PASSWORD", "GOOGLE_API_KEY")
-_missing = [v for v in _REQUIRED_VARS if not os.getenv(v)]
-if _missing:
-    raise RuntimeError(
-        f"Missing required environment variables: {', '.join(_missing)}. "
-        "Check your root .env file."
-    )
+_DATABASE_URL = os.getenv("DATABASE_URL")
+if _DATABASE_URL:
+    # Use DATABASE_URL directly (e.g. Neon, Render, or Supabase hosted PostgreSQL)
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise RuntimeError("Missing required environment variable: GOOGLE_API_KEY.")
+    DB_CONFIG = {"dsn": _DATABASE_URL}
+else:
+    _REQUIRED_VARS = ("HOST_NAME", "DATABASE_NAME", "USER_NAME", "PASSWORD", "GOOGLE_API_KEY")
+    _missing = [v for v in _REQUIRED_VARS if not os.getenv(v)]
+    if _missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(_missing)}. "
+            "Set DATABASE_URL or individual DB parameters in your environment or .env file."
+        )
 
-DB_CONFIG = {
-    "host": os.getenv("HOST_NAME"),
-    "database": os.getenv("DATABASE_NAME"),
-    "user": os.getenv("USER_NAME"),
-    "password": os.getenv("PASSWORD"),
-    "port": int(os.getenv("PORT", "5432")),
-}
+    DB_CONFIG = {
+        "host": os.getenv("HOST_NAME"),
+        "database": os.getenv("DATABASE_NAME"),
+        "user": os.getenv("USER_NAME"),
+        "password": os.getenv("PASSWORD"),
+        "port": int(os.getenv("PORT", "5432")),
+    }
 
 TOP_K = int(os.getenv("FLOATCHAT_TOP_K", "3"))
 RADIUS_METERS = float(os.getenv("FLOATCHAT_RADIUS_METERS", "50000"))
@@ -309,6 +316,8 @@ def compute_stats(profiles: list[dict], variable: str, target_pres: float | None
 # ---------------------------------------------------------------------------
 
 def _get_db_connection():
+    if "dsn" in DB_CONFIG:
+        return psycopg2.connect(DB_CONFIG["dsn"])
     return psycopg2.connect(**DB_CONFIG)
 
 
@@ -549,7 +558,7 @@ def _semantic_search(
     top = sorted(sims, key=lambda x: x[0], reverse=True)[:TOP_K]
 
     results = []
-    with psycopg2.connect(**DB_CONFIG) as conn2:
+    with _get_db_connection() as conn2:
         with conn2.cursor() as cur:
             for _, pid, plat, plon, juld, source_val, wmo_id in top:
                 cur.execute(

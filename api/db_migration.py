@@ -23,19 +23,57 @@ load_dotenv(ROOT_DIR / ".env")
 logger = logging.getLogger("floatchat.migration")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-DB_CONFIG = {
-    "host": os.getenv("HOST_NAME", "localhost"),
-    "database": os.getenv("DATABASE_NAME", "floatchatai"),
-    "user": os.getenv("USER_NAME"),
-    "password": os.getenv("PASSWORD"),
-    "port": int(os.getenv("PORT", "5432")),
-}
+_DATABASE_URL = os.getenv("DATABASE_URL")
+if _DATABASE_URL:
+    DB_CONFIG = {"dsn": _DATABASE_URL}
+else:
+    DB_CONFIG = {
+        "host": os.getenv("HOST_NAME", "localhost"),
+        "database": os.getenv("DATABASE_NAME", "floatchatai"),
+        "user": os.getenv("USER_NAME"),
+        "password": os.getenv("PASSWORD"),
+        "port": int(os.getenv("PORT", "5432")),
+    }
+
+def get_migration_connection():
+    if "dsn" in DB_CONFIG:
+        return psycopg2.connect(DB_CONFIG["dsn"])
+    return psycopg2.connect(**DB_CONFIG)
 
 # ---------------------------------------------------------------------------
 # Migration steps — each is idempotent
 # ---------------------------------------------------------------------------
 
 _MIGRATIONS: list[tuple[str, str]] = [
+    # Step 0: Ensure base tables exist (for clean deployment on hosted databases like Neon)
+    (
+        "create_base_profiles_table",
+        """
+        CREATE TABLE IF NOT EXISTS profiles (
+            id        SERIAL PRIMARY KEY,
+            n_prof    INTEGER,
+            juld      TIMESTAMP,
+            latitude  DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            embedding DOUBLE PRECISION[] NOT NULL
+        );
+        """,
+    ),
+    (
+        "create_base_profile_levels_table",
+        """
+        CREATE TABLE IF NOT EXISTS profile_levels (
+            id         SERIAL PRIMARY KEY,
+            profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+            n_levels   INTEGER,
+            pres       DOUBLE PRECISION,
+            temp       DOUBLE PRECISION,
+            psal       DOUBLE PRECISION,
+            juld       TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_profile_levels_profile_id ON profile_levels(profile_id);
+        """,
+    ),
     # Step 1: Add wmo_id to profiles
     (
         "add_wmo_id_to_profiles",
@@ -133,7 +171,7 @@ def run_migrations(conn: "psycopg2.extensions.connection") -> None:
 
 
 if __name__ == "__main__":
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = get_migration_connection()
     try:
         run_migrations(conn)
         print("All migrations applied successfully.")

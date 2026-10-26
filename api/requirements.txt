@@ -1,9 +1,9 @@
 # API Dependencies - Flask Backend
 
-
-# Web framework
+# Web framework & production server
 flask==3.0.3
 flask-cors==4.0.0
+gunicorn>=21.2.0
 
 # Database connectivity
 psycopg2-binary==2.9.9

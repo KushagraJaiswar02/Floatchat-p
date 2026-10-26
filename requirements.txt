@@ -1,22 +1,31 @@
-
+# Production Web Server & API Framework
 flask==3.0.3
 flask-cors==4.0.0
+gunicorn>=21.2.0
+
+# Database connectivity
 psycopg2-binary==2.9.9
+
+# Data processing and ML
 numpy==1.26.4
 sentence-transformers==3.0.1
 geopy==2.4.1
+
+# AI/LLM integration
 google-generativeai==0.8.3
+
+# Configuration & Utilities
 python-dotenv==1.0.1
+requests>=2.31.0
 
-
+# Frontend Dependencies (Streamlit)
 streamlit>=1.28.0
 pandas>=2.0.0
 plotly>=5.15.0
 plotly-express>=0.4.1
 sqlalchemy>=2.0.0
 Pillow>=10.0.0
-requests>=2.31.0
 
-
+# Ingestion / Optional Analysis
 xarray>=2023.1.0
 qdrant-client>=1.6.0
