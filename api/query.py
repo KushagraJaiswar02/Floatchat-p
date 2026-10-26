@@ -92,19 +92,8 @@ class _LazySentenceTransformer:
 
     def _load(self):
         if self._real_instance is None:
-            logger.info("Lazy-loading sentence-transformer model: %s…", self._model_name)
-            os.environ.setdefault("OMP_NUM_THREADS", "1")
-            os.environ.setdefault("MKL_NUM_THREADS", "1")
-            try:
-                import torch
-                torch.set_num_threads(1)
-                if hasattr(torch, "set_num_interop_threads"):
-                    torch.set_num_interop_threads(1)
-            except Exception:
-                pass
-            from sentence_transformers import SentenceTransformer
-            self._real_instance = SentenceTransformer(self._model_name, device="cpu")
-            logger.info("Sentence-transformer loaded on CPU (threads=1).")
+            from api.model_manager import get_shared_sentence_transformer
+            self._real_instance = get_shared_sentence_transformer(self._model_name)
         return self._real_instance
 
     def encode(self, *args, **kwargs):
@@ -564,23 +553,25 @@ def _semantic_search(
     """
     Embedding-based semantic search over all cached profiles.
     Fallback when no structured filters matched or live fetch failed.
+    Checks DB first to avoid loading the embedding model when no embeddings exist.
     """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, latitude, longitude, juld, embedding, source, wmo_id "
+            "FROM profiles WHERE embedding IS NOT NULL LIMIT 200"
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    # Only load the embedding model and compute query embedding if candidate profiles exist
     query_emb = get_embedding(user_query)
 
     # Extract point location for proximity scoring
     lat, lon = extract_lat_lon(user_query)
     if lat is None or lon is None:
         lat, lon = geocode_place(user_query)
-
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, latitude, longitude, juld, embedding, source, wmo_id "
-            "FROM profiles WHERE embedding IS NOT NULL"
-        )
-        rows = cur.fetchall()
-
-    if not rows:
-        return []
 
     sims = []
     for pid, plat, plon, juld, emb, source_val, wmo_id in rows:

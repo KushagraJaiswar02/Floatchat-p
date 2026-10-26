@@ -29,27 +29,10 @@ logger = logging.getLogger("floatchat.argo_cache")
 # ---------------------------------------------------------------------------
 _CACHE_TTL_HOURS = int(os.getenv("ARGO_CACHE_TTL_HOURS", "24"))
 
-# Embedding model — shared instance, loaded lazily
-_embedding_model: Optional[Any] = None
-
-
+# Embedding model — shared instance via centralized model_manager
 def _get_embedding_model() -> Any:
-    global _embedding_model
-    if _embedding_model is None:
-        logger.info("Initializing SentenceTransformer for argo_cache...")
-        # Enforce CPU & single thread to minimize memory consumption
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        try:
-            import torch
-            torch.set_num_threads(1)
-            if hasattr(torch, "set_num_interop_threads"):
-                torch.set_num_interop_threads(1)
-        except Exception:
-            pass
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-    return _embedding_model
+    from api.model_manager import get_shared_sentence_transformer
+    return get_shared_sentence_transformer("all-MiniLM-L6-v2")
 
 
 def _make_embedding(wmo_id: str, lat: float, lon: float, juld: datetime) -> list[float]:
