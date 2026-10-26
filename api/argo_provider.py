@@ -21,7 +21,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import monotonic
 from typing import Optional
@@ -31,6 +31,7 @@ import requests
 from urllib3.exceptions import HTTPError as UpstreamHTTPError
 
 from api.argo_regions import resolve_region
+from api.query_contract import depth_from_pressure, filter_depth_levels, pressure_at_depth
 
 logger = logging.getLogger("floatchat.argo_provider")
 
@@ -85,6 +86,8 @@ class ArgoFilters:
     region_name: Optional[str] = None
     variables: list[str] = field(default_factory=list)
     max_profiles: int = MAX_PROFILES
+    min_depth_m: Optional[float] = None
+    max_depth_m: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.region_name:
@@ -114,9 +117,23 @@ class ArgoFilters:
             errors.append("min_lat > max_lat")
         if not (1 <= self.max_profiles <= 500):
             errors.append("max_profiles must be 1–500")
+        for value in (self.min_depth_m, self.max_depth_m):
+            if value is not None and (not math.isfinite(value) or not 0 <= value <= 12000):
+                errors.append("Depth bounds must be finite and within [0, 12000] metres.")
+        if self.has_depth_filter() and self.min_depth_m is not None and self.max_depth_m is not None and self.min_depth_m > self.max_depth_m:
+            errors.append("Minimum depth exceeds maximum depth.")
         for wmo in self.wmo_ids:
             if not re.fullmatch(r"\d+", wmo):
                 errors.append(f"Invalid WMO ID {wmo!r} (must be numeric string)")
+        try:
+            start = datetime.strptime(self.date_start, "%Y-%m-%d") if self.date_start else None
+            end = datetime.strptime(self.date_end, "%Y-%m-%d") if self.date_end else None
+            if start and end and start > end:
+                errors.append("Start date is after end date.")
+        except ValueError:
+            errors.append("Invalid calendar date; use YYYY-MM-DD.")
+        if self.min_lon is not None and self.max_lon is not None and self.min_lon > self.max_lon:
+            errors.append("min_lon > max_lon")
         return errors
 
     def has_spatial_filter(self) -> bool:
@@ -126,6 +143,16 @@ class ArgoFilters:
 
     def has_temporal_filter(self) -> bool:
         return self.date_start is not None or self.date_end is not None
+
+    def has_depth_filter(self) -> bool:
+        return self.min_depth_m is not None or self.max_depth_m is not None
+
+
+class ProfileBatch(list):
+    """A bounded real-data sample; completeness is explicit even for empty lists."""
+    def __init__(self, profiles=(), complete=True):
+        super().__init__(profiles)
+        self.complete = complete
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +194,26 @@ class ArgoERDDAPProvider:
 
         url = self._build_url(filters)
         text = self._request_csv(url)
-        return self._parse_csv(text, url)[:filters.max_profiles]
+        return self._filtered_batch(text, url, filters)
+
+    def _filtered_batch(self, text, url, filters):
+        parsed = self._parse_csv(text, url)
+        # A cap or discarded malformed records prevents an exhaustive-zero claim.
+        complete = (getattr(parsed, "complete", True)
+                    and max(0, len(text.splitlines()) - 1) < filters.max_profiles * 300
+                    and len(parsed) <= filters.max_profiles)
+        profiles = []
+        for profile in parsed:
+            if filters.has_depth_filter() and any(
+                depth_from_pressure(level.get("pres"), profile["latitude"]) is None
+                for level in profile["depth_levels"]
+            ):
+                complete = False
+            levels = filter_depth_levels(profile["depth_levels"], profile["latitude"],
+                                         filters.min_depth_m, filters.max_depth_m)
+            if levels:
+                profiles.append({**profile, "depth_levels": levels})
+        return ProfileBatch(profiles[:filters.max_profiles], complete=complete)
 
     @timed("erddap_http")
     def _request_csv(self, url: str) -> str:
@@ -177,9 +223,7 @@ class ArgoERDDAPProvider:
         try:
             resp = requests.get(url, timeout=(ERDDAP_CONNECT_TIMEOUT, ERDDAP_TIMEOUT),
                                 stream=True, allow_redirects=False)
-            if resp.status_code == 404:
-                return ""
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 404):
                 raise ArgoProviderError(f"ERDDAP HTTP {resp.status_code}. Please try again later.")
             chunks = []
             size = 0
@@ -195,7 +239,14 @@ class ArgoERDDAPProvider:
                 if size > MAX_RESPONSE_BYTES:
                     raise ArgoProviderError("ERDDAP response exceeded the safe size limit. Use a smaller area or date range.")
                 chunks.append(chunk)
-            return b"".join(chunks).decode("utf-8")
+            text = b"".join(chunks).decode("utf-8")
+            if resp.status_code == 404:
+                if "no matching results" in text.lower() or "nrows = 0" in text.lower() or "nrows=0" in text.lower():
+                    return ""
+                raise ArgoProviderError("ERDDAP HTTP 404: dataset or endpoint unavailable; no-match status is unconfirmed.")
+            if not text.strip():
+                raise ArgoProviderError("ERDDAP returned an empty or incomplete response; no-match status is unconfirmed.")
+            return text
         except requests.exceptions.Timeout:
             raise ArgoProviderError(f"ERDDAP timed out (connect limit {ERDDAP_CONNECT_TIMEOUT}s, read limit {ERDDAP_TIMEOUT:g}s). Use a shorter date range.") from None
         except (requests.exceptions.RequestException, UpstreamHTTPError):
@@ -215,6 +266,9 @@ class ArgoERDDAPProvider:
 
         if len(filters.wmo_ids) == 1:
             return self.fetch_profiles(filters)
+        errors = filters.validate()
+        if errors:
+            raise ValueError("Invalid filters: " + "; ".join(errors))
 
         # Use ERDDAP regex: platform_number=~"^(id1|id2|id3)$"
         regex_filter = ArgoFilters(
@@ -226,13 +280,15 @@ class ArgoERDDAPProvider:
             date_start=filters.date_start,
             date_end=filters.date_end,
             max_profiles=filters.max_profiles,
+            min_depth_m=filters.min_depth_m,
+            max_depth_m=filters.max_depth_m,
         )
         wmo_pattern = "|".join(re.escape(w) for w in filters.wmo_ids)
         url = self._build_url(regex_filter, extra_constraints=[
             f'platform_number=~"^({wmo_pattern})$"'
         ])
         text = self._request_csv(url)
-        return self._parse_csv(text, url)[:filters.max_profiles]
+        return self._filtered_batch(text, url, filters)
 
     # ------------------------------------------------------------------
 
@@ -260,7 +316,15 @@ class ArgoERDDAPProvider:
         if filters.date_start:
             constraints.append(f'time>="{filters.date_start}T00:00:00Z"')
         if filters.date_end:
-            constraints.append(f'time<="{filters.date_end}T23:59:59Z"')
+            next_day = (datetime.strptime(filters.date_end, "%Y-%m-%d") + timedelta(days=1)).date()
+            constraints.append(f'time<"{next_day}T00:00:00Z"')
+
+        # Conservative pressure prefilter over all latitudes, followed by exact
+        # latitude-dependent depth filtering on returned measurements.
+        if filters.min_depth_m is not None:
+            constraints.append(f"pres>={max(0, pressure_at_depth(filters.min_depth_m, 0) - 1e-6)}")
+        if filters.max_depth_m is not None:
+            constraints.append(f"pres<={pressure_at_depth(filters.max_depth_m, 90) + 1e-6}")
 
         if extra_constraints:
             constraints.extend(extra_constraints)
@@ -290,9 +354,6 @@ class ArgoERDDAPProvider:
         except Exception as exc:
             raise ArgoProviderError(f"CSV parse failed: {exc}")
 
-        if df.empty:
-            return []
-
         # Strip units from column names: "temp (degree_C)" → "temp"
         df.columns = [re.sub(r"\s*\(.*?\)", "", c).strip().lower() for c in df.columns]
 
@@ -300,6 +361,8 @@ class ArgoERDDAPProvider:
         missing = required - set(df.columns)
         if missing:
             raise ArgoProviderError(f"ERDDAP response missing columns: {missing}")
+        if df.empty:
+            return ProfileBatch()
 
         retrieved_at = datetime.now(tz=timezone.utc).isoformat()
         profiles: list[dict] = []
@@ -375,7 +438,7 @@ class ArgoERDDAPProvider:
         logger.info(
             "Parsed %d profiles from ERDDAP (%d data rows)", len(profiles), len(df)
         )
-        return profiles
+        return ProfileBatch(profiles, complete=sum(len(p["depth_levels"]) for p in profiles) == len(df))
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,8 @@ import logging
 import math
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from api.query_contract import utc_reference_date, filter_depth_levels
 from uuid import uuid4
 from pathlib import Path
 
@@ -368,7 +369,9 @@ def compute_stats(profiles: list[dict], variable: str, target_pres: float | None
     values = []
     for p in profiles:
         for lvl in p.get("depth_levels", []):
-            val = lvl.get(variable) or lvl.get({"psal": "salinity"}.get(variable, variable))
+            val = lvl.get(variable)
+            if val is None:
+                val = lvl.get({"psal": "salinity"}.get(variable, variable))
             pres = lvl.get("pres")
             if val is None:
                 continue
@@ -415,8 +418,20 @@ def _get_db_connection(timeout: int | None = None):
     return conn
 
 
+def _describe_constraints(f):
+    parts = []
+    if f.wmo_ids:
+        parts.append("WMO " + ", ".join(f.wmo_ids))
+    if f.has_spatial_filter():
+        parts.append(f"latitude [{f.min_lat}, {f.max_lat}], longitude [{f.min_lon}, {f.max_lon}]")
+    parts.append(f"dates {f.date_start or 'unbounded'} through {f.date_end or 'unbounded'} (UTC, inclusive)")
+    if f.has_depth_filter():
+        parts.append(f"depth [{f.min_depth_m if f.min_depth_m is not None else 0}, {f.max_depth_m if f.max_depth_m is not None else 'unbounded'}] m inclusive, estimated from measured pressure and latitude (UNESCO 1983)")
+    return "Applied constraints: " + "; ".join(parts) + ". Results are bounded samples, not an exhaustive census. "
+
+
 @timed("query_pipeline")
-def query_profiles(user_query: str) -> dict:
+def query_profiles(user_query: str, reference_date: date | datetime | None = None) -> dict:
     """
     Orchestrate the full retrieval pipeline for *user_query*.
 
@@ -432,12 +447,14 @@ def query_profiles(user_query: str) -> dict:
         raise ValueError("Empty query")
 
     with stage("intent_classification"):
-        parsed = parse_query(user_query)
+        parsed = parse_query(user_query, reference_date=reference_date)
     logger.info("Parsed query: intent=%s", parsed.intent)
 
     retrieval_error: str | None = None
     profiles: list[dict] = []
     source_type = "empty"
+
+    parsed.ambiguities.extend(parsed.filters.validate())
 
     # Resolve non-data requests and validation before opening a DB connection.
     system_answers = {
@@ -456,7 +473,8 @@ def query_profiles(user_query: str) -> dict:
             "stats": {},
             "retrieval_error": None,
             "ambiguities": parsed.ambiguities,
-            "system_answer": system_answers.get(parsed.intent),
+            "system_answer": None if parsed.ambiguities else system_answers.get(parsed.intent),
+            "retrieval_status": "invalid_filters" if parsed.ambiguities else "not_requested",
         }
 
     # Educational intent returns pure explanation without database or network retrieval
@@ -476,7 +494,7 @@ def query_profiles(user_query: str) -> dict:
     scope_note = ""
     f = parsed.filters
     if f.has_spatial_filter() and not f.has_temporal_filter() and not f.wmo_ids:
-        today = datetime.now(timezone.utc).date()
+        today = utc_reference_date(reference_date)
         f.date_start = (today - timedelta(days=1)).isoformat()
         f.date_end = today.isoformat()
         f.max_profiles = min(f.max_profiles, TOP_K)
@@ -485,6 +503,9 @@ def query_profiles(user_query: str) -> dict:
             f"returning up to {f.max_profiles} profiles with bounded depth levels. "
             "Specify a date range to search another period. "
         )
+
+    scope_note += _describe_constraints(f)
+    retrieval_complete = False
 
     conn = None
     try:
@@ -520,6 +541,8 @@ def query_profiles(user_query: str) -> dict:
                 date_start=f.date_start,
                 date_end=f.date_end,
                 max_results=TOP_K,
+                min_depth_m=f.min_depth_m,
+                max_depth_m=f.max_depth_m,
             )
 
             # Check freshness for WMO-specific queries
@@ -543,13 +566,16 @@ def query_profiles(user_query: str) -> dict:
                     else:
                         raw_profiles = _argo_provider.fetch_profiles(f)
 
+                    retrieval_complete = getattr(raw_profiles, "complete", True)
                     if raw_profiles:
-                        try:
-                            inserted, updated = upsert_profiles(conn, raw_profiles, skip_embedding=True)
-                            logger.info("Cached %d new, %d updated profiles", inserted, updated)
-                        except Exception as exc:
-                            conn.rollback()
-                            logger.error("Cache write failed: %s", type(exc).__name__)
+                        # Depth-filtered samples must not replace a complete cached profile.
+                        if not f.has_depth_filter():
+                            try:
+                                inserted, updated = upsert_profiles(conn, raw_profiles, skip_embedding=True)
+                                logger.info("Cached %d new, %d updated profiles", inserted, updated)
+                            except Exception as exc:
+                                conn.rollback()
+                                logger.error("Cache write failed: %s", type(exc).__name__)
 
                         # Serve the actual provider results even if the cache write fails.
                         profiles = [
@@ -574,7 +600,7 @@ def query_profiles(user_query: str) -> dict:
         # Path B: Semantic / embedding fallback
         # ---------------------------------------------------------------
         # A recent regional sample must not fall back to unrelated, undated embeddings.
-        if not profiles and not retrieval_error and not scope_note and (not has_structured_filters or ENABLE_LOCAL_FALLBACK):
+        if not profiles and not retrieval_error and not has_structured_filters:
             profiles = _semantic_search(conn, user_query)
             if profiles:
                 source_type = "local"
@@ -587,12 +613,32 @@ def query_profiles(user_query: str) -> dict:
             except Exception:
                 pass
 
+    if f.has_depth_filter():
+        constrained = []
+        for profile in profiles:
+            levels = filter_depth_levels(profile["depth_levels"], profile.get("lat"), f.min_depth_m, f.max_depth_m)
+            if levels:
+                constrained.append({**profile, "depth_levels": levels})
+        profiles = constrained
+
+    retrieval_status = "success" if retrieval_complete else "partial"
+    if retrieval_error:
+        retrieval_status = "failed"
+    elif not profiles and not retrieval_complete:
+        retrieval_status = "incomplete"
+        retrieval_error = (
+            "Retrieval was incomplete or limited to the local cache; no-match status is unconfirmed. "
+            "The result may be limited by safety caps, invalid upstream records, or disabled live retrieval."
+        )
+    elif not profiles:
+        retrieval_status = "empty"
+
     # ---------------------------------------------------------------
     # Compute stats for numerical-answer intent
     # ---------------------------------------------------------------
     stats: dict = {}
     if profiles and parsed.intent == "numerical_answer" and parsed.variables:
-        target_pres = _extract_target_pressure(user_query)
+        target_pres = None if f.has_depth_filter() else _extract_target_pressure(user_query)
         for var in parsed.variables[:2]:
             stats[var] = compute_stats(profiles, var, target_pres)
 
@@ -608,14 +654,21 @@ def query_profiles(user_query: str) -> dict:
             "max_lon": parsed.filters.max_lon,
             "date_start": parsed.filters.date_start,
             "date_end": parsed.filters.date_end,
+            "min_depth_m": f.min_depth_m,
+            "max_depth_m": f.max_depth_m,
+            "depth_bounds": "inclusive",
+            "depth_method": "UNESCO 1983 pressure/latitude estimate",
+            "response_level_limit": 15,
+            "timezone": "UTC",
         },
         "stats": stats,
         "retrieval_error": retrieval_error,
         "ambiguities": parsed.ambiguities,
         "scope_note": scope_note,
+        "retrieval_status": retrieval_status,
         "system_answer": (
-            scope_note + "No matching observations were found in this window."
-            if scope_note and not profiles and not retrieval_error else None
+            scope_note + "No matching observations were found for these constraints. This does not establish absence outside these filters."
+            if not profiles and not retrieval_error else None
         ),
     }
 
@@ -778,6 +831,9 @@ def _format_response(result: dict) -> list[dict]:
         }
         output.append(item)
 
+    output[0]["filters_used"] = result.get("filters_used", {})
+    output[0]["retrieval_status"] = result.get("retrieval_status", "success")
+
     # Attach stats to first item
     if result.get("stats"):
         output[0]["stats"] = result["stats"]
@@ -825,9 +881,11 @@ def query():
                         "time": None,
                         "depth_levels": [],
                         "query_explain": result.get("educational_answer") or result["system_answer"],
-                        "source": result["source_type"],
+                        "source": "educational" if result.get("educational_answer") else "system",
                         "cache_status": "none",
                         "wmo_id": None,
+                        "filters_used": result.get("filters_used", {}),
+                        "retrieval_status": result.get("retrieval_status", "not_requested"),
                     }
                 ]
             )
@@ -846,6 +904,8 @@ def query():
                         "source": "system",
                         "cache_status": "none",
                         "wmo_id": None,
+                        "filters_used": result.get("filters_used", {}),
+                        "retrieval_status": result.get("retrieval_status", "not_requested"),
                     }
                 ]
             )
@@ -866,6 +926,8 @@ def query():
                         "source": "error",
                         "cache_status": "error",
                         "wmo_id": None,
+                        "filters_used": result.get("filters_used", {}),
+                        "retrieval_status": result.get("retrieval_status", "not_requested"),
                     }
                 ]
             )

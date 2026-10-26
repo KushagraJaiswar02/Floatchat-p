@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 from dotenv import load_dotenv
+from api.query_contract import has_coordinate_input
 
 def is_ocean_data_query(user_input):
     """Check if the user input is related to ocean data."""
@@ -16,7 +17,7 @@ def is_ocean_data_query(user_input):
         "longitude", "psu", "dbar", "thermocline", "halocline", "pycnocline", "ctd", "wmo"
     ]
     user_input_lower = user_input.lower()
-    return any(re.search(r"\b" + re.escape(word) + r"\b", user_input_lower) for word in keywords)
+    return has_coordinate_input(user_input) or any(re.search(r"\b" + re.escape(word) + r"\b", user_input_lower) for word in keywords)
 def fall_back_query(user_input):
     """Respond to non-ocean-data queries."""
     return (

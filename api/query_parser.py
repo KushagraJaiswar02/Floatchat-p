@@ -15,6 +15,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
+import calendar
+from api.query_contract import parse_point_coordinates, has_coordinate_input, relative_dates
 from pathlib import Path
 from typing import Optional
 
@@ -57,24 +59,6 @@ _BETWEEN_COORDS_RE = re.compile(
     r"(?:and|,)?\s*long(?:itudes?)?\s+([-+]?\d+\.?\d*)\s*(?:and|to)\s*([-+]?\d+\.?\d*)",
     re.IGNORECASE,
 )
-
-# Coordinates with N/S/E/W indicators: e.g. "15°N, 70°E", "15.5 S and 70.2 E"
-_NSEW_RE = re.compile(
-    r"\b([-+]?\d+\.?\d*)\s*([NSns])\b[^\w\n\r]*[,and\s]*\s*([-+]?\d+\.?\d*)\s*([EWew])\b"
-)
-
-# General lat / lon keywords
-_LAT_RE = re.compile(
-    r"\blat(?:itude)?\s*(?:=|:|\bat\b|\bnear\b|\baround\b|\bof\b|\s+)?\s*([-+]?\d+\.?\d*)\s*([NSns])?",
-    re.IGNORECASE,
-)
-_LON_RE = re.compile(
-    r"\blon(?:g(?:itude)?)?\s*(?:=|:|\bat\b|\bnear\b|\baround\b|\bof\b|\s+)?\s*([-+]?\d+\.?\d*)\s*([EWew])?",
-    re.IGNORECASE,
-)
-
-# Contradictory directional coordinates: e.g. -15°S or -70°W
-_CONTRA_DIR_RE = re.compile(r"(-\d+\.?\d*)\s*([NSnsEWew])\b")
 
 # Date patterns
 _DATE_ISO_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
@@ -139,7 +123,7 @@ class ParsedQuery:
 # Core Parser
 # ---------------------------------------------------------------------------
 
-def parse_query(user_query: str) -> ParsedQuery:
+def parse_query(user_query: str, reference_date: date | datetime | None = None) -> ParsedQuery:
     """
     Extract ArgoFilters and intent from a natural-language oceanographic query.
 
@@ -217,13 +201,6 @@ def parse_query(user_query: str) -> ParsedQuery:
     max_lon: Optional[float] = None
     region_name: Optional[str] = None
 
-    # Check contradictory direction indicators (e.g. -15°S or -70°W)
-    contra_matches = _CONTRA_DIR_RE.findall(q_clean)
-    if contra_matches:
-        ambiguities.append(
-            f"Contradictory coordinate format: negative value with directional indicator '{contra_matches[0][0]} {contra_matches[0][1].upper()}'. Use either negative numbers or N/S/E/W."
-        )
-
     # Check explicit bbox: bbox(min_lat, max_lat, min_lon, max_lon)
     bbox_match = _BBOX_RE.search(q_clean)
     if bbox_match:
@@ -255,61 +232,12 @@ def parse_query(user_query: str) -> ParsedQuery:
 
     # Check point coordinates with directional indicators or lat/lon keywords
     if min_lat is None and not ambiguities:
-        pt_lat: Optional[float] = None
-        pt_lon: Optional[float] = None
-
-        # Try N/S/E/W format: "15°N, 70°E" or "15 N and 70 E"
-        nsew_match = _NSEW_RE.search(q_clean)
-        if nsew_match:
-            lat_v, lat_dir, lon_v, lon_dir = nsew_match.groups()
-            lat_f = float(lat_v) * (-1 if lat_dir.upper() == "S" else 1)
-            lon_f = float(lon_v) * (-1 if lon_dir.upper() == "W" else 1)
-            pt_lat, pt_lon = lat_f, lon_f
-        else:
-            # Try keyword-based lat and lon
-            lat_match = _LAT_RE.search(q_clean)
-            lon_match = _LON_RE.search(q_clean)
-
-            if lat_match:
-                val = float(lat_match.group(1))
-                if lat_match.group(2) and lat_match.group(2).upper() == "S":
-                    val = -abs(val)
-                pt_lat = val
-
-            if lon_match:
-                val = float(lon_match.group(1))
-                if lon_match.group(2) and lon_match.group(2).upper() == "W":
-                    val = -abs(val)
-                pt_lon = val
-
-        # Validate point coordinates
-        if pt_lat is not None and pt_lon is not None:
-            if not (-90 <= pt_lat <= 90):
-                ambiguities.append(f"Latitude {pt_lat} is out of range [-90, 90].")
-            if not (-180 <= pt_lon <= 180):
-                ambiguities.append(f"Longitude {pt_lon} is out of range [-180, 180].")
-
-            if not ambiguities:
-                # Apply configurable bounding box radius for point/near queries
-                radius = DEFAULT_SEARCH_RADIUS_DEG
-                min_lat = max(-90.0, pt_lat - radius)
-                max_lat = min(90.0, pt_lat + radius)
-                min_lon = max(-180.0, pt_lon - radius)
-                max_lon = min(180.0, pt_lon + radius)
-                logger.info("Point lat=%s, lon=%s expanded with radius=%.2f deg -> [%s, %s, %s, %s]",
-                            pt_lat, pt_lon, radius, min_lat, max_lat, min_lon, max_lon)
-
-        elif pt_lat is not None and pt_lon is None:
-            if not (-90 <= pt_lat <= 90):
-                ambiguities.append(f"Latitude {pt_lat} is out of range [-90, 90].")
-            else:
-                ambiguities.append("Latitude was specified without a corresponding longitude. Please provide both coordinates.")
-
-        elif pt_lon is not None and pt_lat is None:
-            if not (-180 <= pt_lon <= 180):
-                ambiguities.append(f"Longitude {pt_lon} is out of range [-180, 180].")
-            else:
-                ambiguities.append("Longitude was specified without a corresponding latitude. Please provide both coordinates.")
+        pt_lat, pt_lon, coordinate_errors = parse_point_coordinates(q_clean)
+        ambiguities.extend(coordinate_errors)
+        if pt_lat is not None and pt_lon is not None and not ambiguities:
+            radius = DEFAULT_SEARCH_RADIUS_DEG
+            min_lat, max_lat = max(-90.0, pt_lat - radius), min(90.0, pt_lat + radius)
+            min_lon, max_lon = max(-180.0, pt_lon - radius), min(180.0, pt_lon + radius)
 
     # Check named region
     if min_lat is None and not ambiguities:
@@ -370,6 +298,24 @@ def parse_query(user_query: str) -> ParsedQuery:
                 end_year = max(int(y) for y in years)
                 date_start = f"{year}-01-01"
                 date_end = f"{end_year}-12-31"
+
+    if not date_start and not ambiguities:
+        resolved = relative_dates(q, reference_date)
+        if resolved:
+            date_start, date_end = resolved
+        elif re.search(r"\b(?:last|this|past|previous|next)\s+(?:\d+\s+)?(?:days?|weeks?|months?|years?)\b", q_lower):
+            ambiguities.append("Unsupported date expression. Use last month, this month, last week, or an explicit ISO date range.")
+
+    min_depth_m = max_depth_m = None
+    depth_match = re.search(
+        r"\bbetween\s+([-+]?\d+(?:\.\d+)?)\s+and\s+([-+]?\d+(?:\.\d+)?)\s*(?:metres?|meters?|m)\b", q_lower
+    )
+    if depth_match:
+        min_depth_m, max_depth_m = map(float, depth_match.groups())
+        if not (0 <= min_depth_m <= max_depth_m <= 12000):
+            ambiguities.append("Invalid depth interval: require 0 <= minimum <= maximum <= 12000 metres (inclusive).")
+        if re.search(r"\bexclusiv(?:e|ely)\b", q_lower):
+            ambiguities.append("Exclusive depth bounds are unsupported; 'between' uses inclusive bounds. Please clarify the interval.")
 
     # --- 7. Determine Query Intent ---
     # Distinct categories:
@@ -454,6 +400,8 @@ def parse_query(user_query: str) -> ParsedQuery:
         date_end=date_end,
         region_name=region_name,
         variables=variables,
+        min_depth_m=min_depth_m,
+        max_depth_m=max_depth_m,
     )
 
     return ParsedQuery(
@@ -477,8 +425,5 @@ def _parse_month_year(month_str: str, year_str: str) -> tuple[str, str] | None:
     if not month_num:
         return None
     year = int(year_str)
-    if month_num == 12:
-        last_day = 31
-    else:
-        last_day = (date(year, month_num + 1, 1) - date(year, month_num, 1)).days  # type: ignore[arg-type]
+    last_day = calendar.monthrange(year, month_num)[1]
     return (f"{year}-{month_num:02d}-01", f"{year}-{month_num:02d}-{last_day:02d}")

@@ -217,7 +217,7 @@ class TestERDDAPProviderURLs(unittest.TestCase):
         )
         url = self.provider._build_url(f)
         self.assertIn("2026-01-01", url)
-        self.assertIn("2026-03-31", url)
+        self.assertIn('time<"2026-04-01T00:00:00Z"', url)
 
     def test_url_ends_with_csvp(self):
         f = provider_mod.ArgoFilters(wmo_ids=["1234567"])
@@ -308,7 +308,7 @@ class TestProviderFetch(unittest.TestCase):
 
     def test_fetch_returns_empty_on_404(self):
         f = provider_mod.ArgoFilters(wmo_ids=["9999999"])
-        with patch("requests.get", return_value=self._make_response("", 404)):
+        with patch("requests.get", return_value=self._make_response('Error { message="Your query produced no matching results. (nRows = 0)"; }', 404)):
             profiles = self.provider.fetch_profiles(f)
         self.assertEqual(profiles, [])
 

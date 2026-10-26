@@ -20,6 +20,7 @@ from typing import Any, Optional
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
+from api.query_contract import depth_sql, filter_depth_levels
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
@@ -144,7 +145,7 @@ def upsert_profiles(
                 for idx, lvl in enumerate(depth_levels):
                     pres = _safe_float(lvl.get("pres"))
                     temp = _safe_float(lvl.get("temp"))
-                    psal = _safe_float(lvl.get("psal") or lvl.get("salinity"))
+                    psal = _safe_float(lvl.get("psal") if lvl.get("psal") is not None else lvl.get("salinity"))
                     pres_qc = lvl.get("pres_qc")
                     temp_qc = lvl.get("temp_qc")
                     psal_qc = lvl.get("psal_qc")
@@ -188,6 +189,8 @@ def lookup_cached_profiles(
     source: str | None = None,
     max_results: int = 50,
     require_fresh: bool = False,
+    min_depth_m: float | None = None,
+    max_depth_m: float | None = None,
 ) -> list[dict]:
     """
     Query cached profiles with structured filters.
@@ -220,8 +223,8 @@ def lookup_cached_profiles(
         conditions.append("juld >= %s")
         params.append(date_start)
     if date_end:
-        conditions.append("juld <= %s")
-        params.append(date_end + " 23:59:59")
+        conditions.append("juld < %s")
+        params.append((datetime.strptime(date_end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00"))
 
     if source:
         conditions.append("source = %s")
@@ -231,6 +234,16 @@ def lookup_cached_profiles(
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=_CACHE_TTL_HOURS)
         conditions.append("(retrieved_at IS NULL OR retrieved_at >= %s)")
         params.append(cutoff.isoformat())
+
+    depth_clauses, depth_params = [], []
+    for bound, op in ((min_depth_m, ">="), (max_depth_m, "<=")):
+        if bound is not None:
+            depth_clauses.append(f"({depth_sql()}) {op} %s")
+            depth_params.append(bound)
+    if depth_clauses:
+        conditions.append("EXISTS (SELECT 1 FROM profile_levels l WHERE l.profile_id = profiles.id "
+                          "AND l.pres >= 0 AND " + " AND ".join(depth_clauses) + ")")
+        params.extend(depth_params)
 
     where_clause = " AND ".join(conditions) if conditions else "TRUE"
     params.append(max_results)
@@ -264,15 +277,24 @@ def lookup_cached_profiles(
                 continue
 
             # Fetch depth levels
+            level_depth_sql = ""
+            level_params = [pid]
+            if depth_clauses:
+                level_depth_sql = " AND l.pres >= 0 AND " + " AND ".join(
+                    f"({depth_sql(lat='p.latitude')}) {op} %s"
+                    for bound, op in ((min_depth_m, ">="), (max_depth_m, "<=")) if bound is not None
+                )
+                level_params.extend(depth_params)
             cur.execute(
-                """
+                f"""
                 SELECT pres, temp, psal, pres_qc, temp_qc, psal_qc
-                FROM profile_levels
+                FROM profile_levels l JOIN profiles p ON p.id = l.profile_id
                 WHERE profile_id = %s
+                {level_depth_sql}
                 ORDER BY n_levels ASC
                 LIMIT 200
                 """,
-                (pid,),
+                level_params,
             )
             levels_rows = cur.fetchall()
 
@@ -299,6 +321,9 @@ def lookup_cached_profiles(
                     }
                 )
 
+            depth_levels = filter_depth_levels(depth_levels, lat, min_depth_m, max_depth_m)
+            if depth_clauses and not depth_levels:
+                continue
             juld_str = juld.strftime("%Y-%m-%d %H:%M:%S") if juld else "unknown"
 
             # Determine cache status for frontend display
