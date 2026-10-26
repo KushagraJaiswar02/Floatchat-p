@@ -57,16 +57,18 @@ _DATABASE_URL = os.getenv("DATABASE_URL")
 if _DATABASE_URL:
     # Use DATABASE_URL directly (e.g. Neon, Render, or Supabase hosted PostgreSQL)
     if not os.getenv("GOOGLE_API_KEY"):
-        raise RuntimeError("Missing required environment variable: GOOGLE_API_KEY.")
+        logger.warning("GOOGLE_API_KEY environment variable is not set; AI explanations will be unavailable.")
     DB_CONFIG = {"dsn": _DATABASE_URL}
 else:
-    _REQUIRED_VARS = ("HOST_NAME", "DATABASE_NAME", "USER_NAME", "PASSWORD", "GOOGLE_API_KEY")
+    _REQUIRED_VARS = ("HOST_NAME", "DATABASE_NAME", "USER_NAME", "PASSWORD")
     _missing = [v for v in _REQUIRED_VARS if not os.getenv(v)]
     if _missing:
-        raise RuntimeError(
-            f"Missing required environment variables: {', '.join(_missing)}. "
-            "Set DATABASE_URL or individual DB parameters in your environment or .env file."
+        logger.warning(
+            "Missing database environment variables: %s. Set DATABASE_URL or individual DB parameters.",
+            ", ".join(_missing),
         )
+    if not os.getenv("GOOGLE_API_KEY"):
+        logger.warning("GOOGLE_API_KEY environment variable is not set; AI explanations will be unavailable.")
 
     DB_CONFIG = {
         "host": os.getenv("HOST_NAME"),
@@ -82,16 +84,55 @@ ENABLE_LIVE_FETCH = os.getenv("ARGO_LIVE_FETCH", "true").lower() not in ("false"
 ENABLE_LOCAL_FALLBACK = os.getenv("ARGO_LOCAL_FALLBACK", "true").lower() not in ("false", "0", "no")
 
 # ---------------------------------------------------------------------------
-# ML models — loaded once at startup
+# ML models — lazy proxies for fast startup and testing compatibility
 # ---------------------------------------------------------------------------
-logger.info("Loading sentence-transformer model…")
-_st_model = SentenceTransformer("all-MiniLM-L6-v2")
-logger.info("Sentence-transformer loaded.")
+class _LazySentenceTransformer:
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self._model_name = model_name
+        self._real_instance = None
 
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    def _load(self):
+        if self._real_instance is None:
+            logger.info("Loading sentence-transformer model: %s…", self._model_name)
+            self._real_instance = SentenceTransformer(self._model_name)
+            logger.info("Sentence-transformer loaded.")
+        return self._real_instance
+
+    def encode(self, *args, **kwargs):
+        return self._load().encode(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
+_st_model = _LazySentenceTransformer("all-MiniLM-L6-v2")
+
+
+class _LazyGeminiModel:
+    def __init__(self, model_name: str):
+        self._model_name = model_name
+        self._real_instance = None
+        self._configured = False
+
+    def _load(self):
+        if self._real_instance is None:
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if api_key and not self._configured:
+                genai.configure(api_key=api_key)
+                self._configured = True
+            logger.info("Using Gemini model: %s", self._model_name)
+            self._real_instance = genai.GenerativeModel(self._model_name)
+        return self._real_instance
+
+    def generate_content(self, *args, **kwargs):
+        return self._load().generate_content(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
 _GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash")
-gemini_model = genai.GenerativeModel(_GEMINI_MODEL_NAME)
-logger.info("Using Gemini model: %s", _GEMINI_MODEL_NAME)
+gemini_model = _LazyGeminiModel(_GEMINI_MODEL_NAME)
 
 # Argo provider singleton
 _argo_provider = ArgoERDDAPProvider()
@@ -315,10 +356,15 @@ def compute_stats(profiles: list[dict], variable: str, target_pres: float | None
 # Main query orchestration
 # ---------------------------------------------------------------------------
 
-def _get_db_connection():
+def _get_db_connection(timeout: int | None = None):
     if "dsn" in DB_CONFIG:
+        if timeout is not None:
+            return psycopg2.connect(DB_CONFIG["dsn"], connect_timeout=timeout)
         return psycopg2.connect(DB_CONFIG["dsn"])
-    return psycopg2.connect(**DB_CONFIG)
+    cfg = dict(DB_CONFIG)
+    if timeout is not None:
+        cfg["connect_timeout"] = timeout
+    return psycopg2.connect(**cfg)
 
 
 def query_profiles(user_query: str) -> dict:
@@ -761,14 +807,14 @@ def query():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check with DB connectivity status."""
+    """Health check with DB connectivity status and fast timeout."""
     db_ok = False
     try:
-        conn = _get_db_connection()
+        conn = _get_db_connection(timeout=3)
         conn.close()
         db_ok = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Health check DB probe failed: %s", exc)
     return jsonify(
         {
             "status": "ok" if db_ok else "degraded",
