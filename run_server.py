@@ -19,6 +19,17 @@ logger = logging.getLogger("floatchat.server")
 
 
 def main():
+    # Enforce CPU & single-thread execution for PyTorch to minimize memory footprint
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    try:
+        import torch
+        torch.set_num_threads(1)
+        if hasattr(torch, "set_num_interop_threads"):
+            torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
     port_str = os.environ.get("PORT", "10000")
     try:
         port = int(port_str)
@@ -27,7 +38,7 @@ def main():
         port = 10000
 
     host = "0.0.0.0"
-    logger.info("Initializing FloatChat backend server...")
+    logger.info("Initializing FloatChat backend server (low-memory CPU configuration)...")
 
     from api.query import app
     from waitress import serve

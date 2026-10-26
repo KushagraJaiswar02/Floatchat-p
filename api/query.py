@@ -30,7 +30,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from geopy.geocoders import Nominatim
 from geopy.distance import distance
-from sentence_transformers import SentenceTransformer
 
 # Local modules
 from api.query_parser import parse_query, ParsedQuery
@@ -93,9 +92,19 @@ class _LazySentenceTransformer:
 
     def _load(self):
         if self._real_instance is None:
-            logger.info("Loading sentence-transformer model: %s…", self._model_name)
-            self._real_instance = SentenceTransformer(self._model_name)
-            logger.info("Sentence-transformer loaded.")
+            logger.info("Lazy-loading sentence-transformer model: %s…", self._model_name)
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("MKL_NUM_THREADS", "1")
+            try:
+                import torch
+                torch.set_num_threads(1)
+                if hasattr(torch, "set_num_interop_threads"):
+                    torch.set_num_interop_threads(1)
+            except Exception:
+                pass
+            from sentence_transformers import SentenceTransformer
+            self._real_instance = SentenceTransformer(self._model_name, device="cpu")
+            logger.info("Sentence-transformer loaded on CPU (threads=1).")
         return self._real_instance
 
     def encode(self, *args, **kwargs):

@@ -18,7 +18,6 @@ from typing import Any, Optional
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
@@ -31,13 +30,25 @@ logger = logging.getLogger("floatchat.argo_cache")
 _CACHE_TTL_HOURS = int(os.getenv("ARGO_CACHE_TTL_HOURS", "24"))
 
 # Embedding model — shared instance, loaded lazily
-_embedding_model: Optional[SentenceTransformer] = None
+_embedding_model: Optional[Any] = None
 
 
-def _get_embedding_model() -> SentenceTransformer:
+def _get_embedding_model() -> Any:
     global _embedding_model
     if _embedding_model is None:
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Initializing SentenceTransformer for argo_cache...")
+        # Enforce CPU & single thread to minimize memory consumption
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        try:
+            import torch
+            torch.set_num_threads(1)
+            if hasattr(torch, "set_num_interop_threads"):
+                torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     return _embedding_model
 
 
