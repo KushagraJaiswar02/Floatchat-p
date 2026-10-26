@@ -117,7 +117,9 @@ def show_map():
                 float_df = filtered_df[filtered_df["float_id"] == float_id].sort_values("time")
                 customdata = np.array(float_df[["cumulative_distance_km"]].round(2))
 
-                fig_map.add_trace(go.Scattermapbox(
+                # Use Plotly MapLibre API (Scattermap) with fallback to Scattermapbox
+                scatter_map_fn = getattr(go, "Scattermap", getattr(go, "Scattermapbox", None))
+                fig_map.add_trace(scatter_map_fn(
                     lon=float_df["longitude"],
                     lat=float_df["latitude"],
                     mode="lines+markers",
@@ -134,15 +136,21 @@ def show_map():
                     text=float_df["time"].astype(str)
                 ))
 
-            fig_map.update_layout(
-                mapbox=dict(
-                    style="open-street-map",
-                    zoom=3,
-                    center={"lat": filtered_df["latitude"].mean(), "lon": filtered_df["longitude"].mean()},
-                ),
-                margin={"r":0,"t":30,"l":0,"b":0},
-                title="ARGO Float Trajectories with Distance Traveled"
+            map_config = dict(
+                style="open-street-map",
+                zoom=3,
+                center={"lat": float(filtered_df["latitude"].mean()), "lon": float(filtered_df["longitude"].mean())},
             )
+            layout_kwargs = {
+                "margin": {"r": 0, "t": 30, "l": 0, "b": 0},
+                "title": "ARGO Float Trajectories with Distance Traveled",
+            }
+            if hasattr(go, "Scattermap"):
+                layout_kwargs["map"] = map_config
+            else:
+                layout_kwargs["mapbox"] = map_config
+
+            fig_map.update_layout(**layout_kwargs)
             st.plotly_chart(fig_map, use_container_width=True)
 
             st.subheader("Custom Scatter Plot")

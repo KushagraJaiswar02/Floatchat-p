@@ -21,7 +21,7 @@ requests>=2.31.0
 # Frontend Dependencies (Streamlit)
 streamlit>=1.28.0
 pandas>=2.0.0
-plotly>=5.15.0
+plotly>=5.24.0,<6.0.0
 plotly-express>=0.4.1
 sqlalchemy>=2.0.0
 Pillow>=10.0.0

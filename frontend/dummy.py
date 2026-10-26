@@ -327,17 +327,21 @@ elif st.session_state.current_page == 'map':
     
     df = load_data()
     
-    # Create map
-    fig = px.scatter_mapbox(df, 
-                           lat="latitude", 
-                           lon="longitude",
-                           color="temperature",
-                           size="depth",
-                           hover_data=["salinity", "oxygen"],
-                           mapbox_style="open-street-map",
-                           zoom=8,
-                           height=600,
-                           title="ARGO Float Locations")
+    # Create map using MapLibre API if available
+    scatter_map_func = getattr(px, "scatter_map", getattr(px, "scatter_mapbox", None))
+    map_style_kw = "map_style" if hasattr(px, "scatter_map") else "mapbox_style"
+    map_kwargs = {
+        "lat": "latitude",
+        "lon": "longitude",
+        "color": "temperature",
+        "size": "depth",
+        "hover_data": ["salinity", "oxygen"],
+        map_style_kw: "open-street-map",
+        "zoom": 8,
+        "height": 600,
+        "title": "ARGO Float Locations",
+    }
+    fig = scatter_map_func(df, **map_kwargs)
     
     st.plotly_chart(fig, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
